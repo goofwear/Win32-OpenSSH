@@ -1,4 +1,4 @@
-/* $OpenBSD: auth.c,v 1.113 2015/08/21 03:42:19 djm Exp $ */
+/* $OpenBSD: auth.c,v 1.124 2017/09/12 06:32:07 djm Exp $ */
 /*
  * Copyright (c) 2000 Markus Friedl.  All rights reserved.
  *
@@ -25,17 +25,9 @@
 
 #include "includes.h"
 
-/*
- * We support only client side kerberos on Windows.
- */
-
-#ifdef WIN32_FIXME
-  #undef GSSAPI
-  #undef KRB5
-#endif
-
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
 
 #include <netinet/in.h>
 
@@ -51,14 +43,12 @@
 #ifdef USE_SHADOW
 #include <shadow.h>
 #endif
-#ifdef HAVE_LIBGEN_H
-#include <libgen.h>
-#endif
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <limits.h>
+#include <netdb.h>
 
 #include "xmalloc.h"
 #include "match.h"
@@ -83,6 +73,7 @@
 #include "authfile.h"
 #include "ssherr.h"
 #include "compat.h"
+#include "sshfileperm.h"
 
 /* import */
 extern ServerOptions options;
@@ -106,9 +97,11 @@ int auth_debug_init;
 int
 allowed_user(struct passwd * pw)
 {
+	struct ssh *ssh = active_state; /* XXX */
 	struct stat st;
 	const char *hostname = NULL, *ipaddr = NULL, *passwd = NULL;
 	u_int i;
+	int r;
 #ifdef USE_SHADOW
 	struct spwd *spw = NULL;
 #endif
@@ -179,7 +172,6 @@ allowed_user(struct passwd * pw)
 			free(shell);
 			return 0;
 		}
-#ifndef WIN32_FIXME
 		if (S_ISREG(st.st_mode) == 0 ||
 		    (st.st_mode & (S_IXOTH|S_IXUSR|S_IXGRP)) == 0) {
 			logit("User %.100s not allowed because shell %.100s "
@@ -187,33 +179,42 @@ allowed_user(struct passwd * pw)
 			free(shell);
 			return 0;
 		}
-#endif
 		free(shell);
 	}
 
 	if (options.num_deny_users > 0 || options.num_allow_users > 0 ||
 	    options.num_deny_groups > 0 || options.num_allow_groups > 0) {
-		hostname = get_canonical_hostname(options.use_dns);
-		ipaddr = get_remote_ipaddr();
+		hostname = auth_get_canonical_hostname(ssh, options.use_dns);
+		ipaddr = ssh_remote_ipaddr(ssh);
 	}
 
 	/* Return false if user is listed in DenyUsers */
 	if (options.num_deny_users > 0) {
-		for (i = 0; i < options.num_deny_users; i++)
-			if (match_user(pw->pw_name, hostname, ipaddr,
-			    options.deny_users[i])) {
+		for (i = 0; i < options.num_deny_users; i++) {
+			r = match_user(pw->pw_name, hostname, ipaddr,
+			    options.deny_users[i]);
+			if (r < 0) {
+				fatal("Invalid DenyUsers pattern \"%.100s\"",
+				    options.deny_users[i]);
+			} else if (r != 0) {
 				logit("User %.100s from %.100s not allowed "
 				    "because listed in DenyUsers",
 				    pw->pw_name, hostname);
 				return 0;
 			}
+		}
 	}
 	/* Return false if AllowUsers isn't empty and user isn't listed there */
 	if (options.num_allow_users > 0) {
-		for (i = 0; i < options.num_allow_users; i++)
-			if (match_user(pw->pw_name, hostname, ipaddr,
-			    options.allow_users[i]))
+		for (i = 0; i < options.num_allow_users; i++) {
+			r = match_user(pw->pw_name, hostname, ipaddr,
+			    options.allow_users[i]);
+			if (r < 0) {
+				fatal("Invalid AllowUsers pattern \"%.100s\"",
+				    options.allow_users[i]);
+			} else if (r == 1)
 				break;
+		}
 		/* i < options.num_allow_users iff we break for loop */
 		if (i >= options.num_allow_users) {
 			logit("User %.100s from %.100s not allowed because "
@@ -264,29 +265,51 @@ allowed_user(struct passwd * pw)
 	return 1;
 }
 
-void
-auth_info(Authctxt *authctxt, const char *fmt, ...)
+/*
+ * Formats any key left in authctxt->auth_method_key for inclusion in
+ * auth_log()'s message. Also includes authxtct->auth_method_info if present.
+ */
+static char *
+format_method_key(Authctxt *authctxt)
 {
-	va_list ap;
-        int i;
+	const struct sshkey *key = authctxt->auth_method_key;
+	const char *methinfo = authctxt->auth_method_info;
+	char *fp, *ret = NULL;
 
-	free(authctxt->info);
-	authctxt->info = NULL;
+	if (key == NULL)
+		return NULL;
 
-	va_start(ap, fmt);
-	i = vasprintf(&authctxt->info, fmt, ap);
-	va_end(ap);
-
-	if (i < 0 || authctxt->info == NULL)
-		fatal("vasprintf failed");
+	if (key_is_cert(key)) {
+		fp = sshkey_fingerprint(key->cert->signature_key,
+		    options.fingerprint_hash, SSH_FP_DEFAULT);
+		xasprintf(&ret, "%s ID %s (serial %llu) CA %s %s%s%s",
+		    sshkey_type(key), key->cert->key_id,
+		    (unsigned long long)key->cert->serial,
+		    sshkey_type(key->cert->signature_key),
+		    fp == NULL ? "(null)" : fp,
+		    methinfo == NULL ? "" : ", ",
+		    methinfo == NULL ? "" : methinfo);
+		free(fp);
+	} else {
+		fp = sshkey_fingerprint(key, options.fingerprint_hash,
+		    SSH_FP_DEFAULT);
+		xasprintf(&ret, "%s %s%s%s", sshkey_type(key),
+		    fp == NULL ? "(null)" : fp,
+		    methinfo == NULL ? "" : ", ",
+		    methinfo == NULL ? "" : methinfo);
+		free(fp);
+	}
+	return ret;
 }
 
 void
 auth_log(Authctxt *authctxt, int authenticated, int partial,
     const char *method, const char *submethod)
 {
+	struct ssh *ssh = active_state; /* XXX */
 	void (*authlog) (const char *fmt,...) = verbose;
-	char *authmsg;
+	const char *authmsg;
+	char *extra = NULL;
 
 	if (use_privsep && !mm_is_monitor() && !authctxt->postponed)
 		return;
@@ -305,19 +328,23 @@ auth_log(Authctxt *authctxt, int authenticated, int partial,
 	else
 		authmsg = authenticated ? "Accepted" : "Failed";
 
-	authlog("%s %s%s%s for %s%.100s from %.200s port %d %s%s%s",
+	if ((extra = format_method_key(authctxt)) == NULL) {
+		if (authctxt->auth_method_info != NULL)
+			extra = xstrdup(authctxt->auth_method_info);
+	}
+
+	authlog("%s %s%s%s for %s%.100s from %.200s port %d ssh2%s%s",
 	    authmsg,
 	    method,
 	    submethod != NULL ? "/" : "", submethod == NULL ? "" : submethod,
 	    authctxt->valid ? "" : "invalid user ",
 	    authctxt->user,
-	    get_remote_ipaddr(),
-	    get_remote_port(),
-	    compat20 ? "ssh2" : "ssh1",
-	    authctxt->info != NULL ? ": " : "",
-	    authctxt->info != NULL ? authctxt->info : "");
-	free(authctxt->info);
-	authctxt->info = NULL;
+	    ssh_remote_ipaddr(ssh),
+	    ssh_remote_port(ssh),
+	    extra != NULL ? ": " : "",
+	    extra != NULL ? extra : "");
+
+	free(extra);
 
 #ifdef CUSTOM_FAILED_LOGIN
 	if (authenticated == 0 && !authctxt->postponed &&
@@ -325,11 +352,12 @@ auth_log(Authctxt *authctxt, int authenticated, int partial,
 	    strncmp(method, "keyboard-interactive", 20) == 0 ||
 	    strcmp(method, "challenge-response") == 0))
 		record_failed_login(authctxt->user,
-		    get_canonical_hostname(options.use_dns), "ssh");
+		    auth_get_canonical_hostname(ssh, options.use_dns), "ssh");
 # ifdef WITH_AIXAUTHENTICATE
 	if (authenticated)
 		sys_auth_record_login(authctxt->user,
-		    get_canonical_hostname(options.use_dns), "ssh", &loginmsg);
+		    auth_get_canonical_hostname(ssh, options.use_dns), "ssh",
+		    &loginmsg);
 # endif
 #endif
 #ifdef SSH_AUDIT_EVENTS
@@ -342,13 +370,14 @@ auth_log(Authctxt *authctxt, int authenticated, int partial,
 void
 auth_maxtries_exceeded(Authctxt *authctxt)
 {
+	struct ssh *ssh = active_state; /* XXX */
+
 	error("maximum authentication attempts exceeded for "
-	    "%s%.100s from %.200s port %d %s",
+	    "%s%.100s from %.200s port %d ssh2",
 	    authctxt->valid ? "" : "invalid user ",
 	    authctxt->user,
-	    get_remote_ipaddr(),
-	    get_remote_port(),
-	    compat20 ? "ssh2" : "ssh1");
+	    ssh_remote_ipaddr(ssh),
+	    ssh_remote_port(ssh));
 	packet_disconnect("Too many authentication failures");
 	/* NOTREACHED */
 }
@@ -359,6 +388,8 @@ auth_maxtries_exceeded(Authctxt *authctxt)
 int
 auth_root_allowed(const char *method)
 {
+	struct ssh *ssh = active_state; /* XXX */
+
 	switch (options.permit_root_login) {
 	case PERMIT_YES:
 		return 1;
@@ -375,7 +406,8 @@ auth_root_allowed(const char *method)
 		}
 		break;
 	}
-	logit("ROOT LOGIN REFUSED FROM %.200s", get_remote_ipaddr());
+	logit("ROOT LOGIN REFUSED FROM %.200s port %d",
+	    ssh_remote_ipaddr(ssh), ssh_remote_port(ssh));
 	return 0;
 }
 
@@ -387,79 +419,6 @@ auth_root_allowed(const char *method)
  *
  * This returns a buffer allocated by xmalloc.
  */
- 
-/*
- * Win32 implementation uses UTF16 names.
- */
- 
-#ifdef WIN32_FIXME
-
-wchar_t *expand_authorized_keys(const wchar_t *filename, struct passwd *pw)
-{
-  wchar_t *file_w, ret[MAXPATHLEN], pw_name_w[MAXPATHLEN], filename_w[MAXPATHLEN];
-
-  int i;
-  
-  wchar_t *slash;
-  
-  i = MultiByteToWideChar(CP_UTF8, 0, filename, -1, filename_w, MAXPATHLEN);
-  
-  if (i == 0)
-  {
-    fatal("expand_authorized_keys: unable to convert path to UTF-16");
-  }  
-  
-  MultiByteToWideChar(CP_UTF8, 0, pw -> pw_name, -1, pw_name_w, MAXPATHLEN);
-  
-  if (i == 0)
-  {
-    fatal("expand_authorized_keys: unable to convert path to UTF-16");
-  }
-  
-  file_w = percent_expand_w(filename_w, L"h", pw -> pw_dir,
-                                L"u", pw_name_w, (char *) NULL);
-  
-  /*
-   * Replace '/'  with '\'
-   */
-
-  slash = file_w; 
-  
-  while ((slash = wcschr(slash, L'/')))
-  {
-    *slash = L'\\';
-  }
-  
-  /*
-   * Absolute path given.
-   */
-   
-  if (wcschr(file_w, ':'))
-  {
-    i = _snwprintf(ret, sizeof(ret), L"%ls", file_w);
-  }
-   
-  /*
-   * Relative path given. Expand to user homedir.
-   */
-   
-  else
-  {
-    i = _snwprintf(ret, sizeof(ret), L"%ls\\%ls", pw->pw_dir, file_w);
-  }  
-  
-  if (i < 0 || (size_t) i >= sizeof(ret))
-  {  
-    fatal("expand_authorized_keys: path too long");
-  }  
-
-  free(file_w);
-  
-  return (_wcsdup(ret));
-}
-
-#else /* WIN32_FIXME */
-
 char *
 expand_authorized_keys(const char *filename, struct passwd *pw)
 {
@@ -469,6 +428,13 @@ expand_authorized_keys(const char *filename, struct passwd *pw)
 	file = percent_expand(filename, "h", pw->pw_dir,
 	    "u", pw->pw_name, (char *)NULL);
 
+#ifdef WINDOWS
+	/* Return if the path is absolute. If not, prepend the '%h\\' */
+	if ((strlen(file) > 1) && (file[1] == ':'))
+		return (file);
+
+	i = snprintf(ret, sizeof(ret), "%s\\%s", pw->pw_dir, file);
+#else
 	/*
 	 * Ensure that filename starts anchored. If not, be backward
 	 * compatible and prepend the '%h/'
@@ -477,12 +443,13 @@ expand_authorized_keys(const char *filename, struct passwd *pw)
 		return (file);
 
 	i = snprintf(ret, sizeof(ret), "%s/%s", pw->pw_dir, file);
+#endif // WINDOWS
+
 	if (i < 0 || (size_t)i >= sizeof(ret))
 		fatal("expand_authorized_keys: path too long");
 	free(file);
 	return (xstrdup(ret));
 }
-#endif /* WIN32_FIXME */
 
 char *
 authorized_principals_file(struct passwd *pw)
@@ -494,7 +461,7 @@ authorized_principals_file(struct passwd *pw)
 
 /* return ok if key exists in sysfile or userfile */
 HostStatus
-check_key_in_hostfiles(struct passwd *pw, Key *key, const char *host,
+check_key_in_hostfiles(struct passwd *pw, struct sshkey *key, const char *host,
     const char *sysfile, const char *userfile)
 {
 	char *user_hostfile;
@@ -538,106 +505,6 @@ check_key_in_hostfiles(struct passwd *pw, Key *key, const char *host,
 	return host_status;
 }
 
-/*
- * Check a given path for security. This is defined as all components
- * of the path to the file must be owned by either the owner of
- * of the file or root and no directories must be group or world writable.
- *
- * XXX Should any specific check be done for sym links ?
- *
- * Takes a file name, its stat information (preferably from fstat() to
- * avoid races), the uid of the expected owner, their home directory and an
- * error buffer plus max size as arguments.
- *
- * Returns 0 on success and -1 on failure
- */
-int
-auth_secure_path(const char *name, struct stat *stp, const char *pw_dir,
-    uid_t uid, char *err, size_t errlen)
-{
-#ifndef WIN32_FIXME
-	char buf[PATH_MAX], homedir[PATH_MAX];
-	char *cp;
-	int comparehome = 0;
-	struct stat st;
-
-	if (realpath(name, buf) == NULL) {
-		snprintf(err, errlen, "realpath %s failed: %s", name,
-		    strerror(errno));
-		return -1;
-	}
-	if (pw_dir != NULL && realpath(pw_dir, homedir) != NULL)
-		comparehome = 1;
-
-	if (!S_ISREG(stp->st_mode)) {
-		snprintf(err, errlen, "%s is not a regular file", buf);
-		return -1;
-	}
-	if ((!platform_sys_dir_uid(stp->st_uid) && stp->st_uid != uid) ||
-	    (stp->st_mode & 022) != 0) {
-		snprintf(err, errlen, "bad ownership or modes for file %s",
-		    buf);
-		return -1;
-	}
-
-	/* for each component of the canonical path, walking upwards */
-	for (;;) {
-		if ((cp = dirname(buf)) == NULL) {
-			snprintf(err, errlen, "dirname() failed");
-			return -1;
-		}
-		strlcpy(buf, cp, sizeof(buf));
-
-		if (stat(buf, &st) < 0 ||
-		    (!platform_sys_dir_uid(st.st_uid) && st.st_uid != uid) ||
-		    (st.st_mode & 022) != 0) {
-			snprintf(err, errlen,
-			    "bad ownership or modes for directory %s", buf);
-			return -1;
-		}
-
-		/* If are past the homedir then we can stop */
-		if (comparehome && strcmp(homedir, buf) == 0)
-			break;
-
-		/*
-		 * dirname should always complete with a "/" path,
-		 * but we can be paranoid and check for "." too
-		 */
-		if ((strcmp("/", buf) == 0) || (strcmp(".", buf) == 0))
-			break;
-	}
-	return 0;
-#else
-  return 0;
-#endif 
-}
-
-/*
- * Version of secure_path() that accepts an open file descriptor to
- * avoid races.
- *
- * Returns 0 on success and -1 on failure
- */
-static int
-secure_filename(FILE *f, const char *file, struct passwd *pw,
-    char *err, size_t errlen)
-{
-#ifndef WIN32_FIXME
-	struct stat st;
-
-	/* check the open file to avoid races */
-	if (fstat(fileno(f), &st) < 0) {
-		snprintf(err, errlen, "cannot stat file %s: %s",
-		    file, strerror(errno));
-		return -1;
-	}
-	return auth_secure_path(file, &st, pw->pw_dir, pw->pw_uid, err, errlen);
-#else
-  return 0;
-#endif 
-}
-
 static FILE *
 auth_openfile(const char *file, struct passwd *pw, int strict_modes,
     int log_missing, char *file_type)
@@ -646,12 +513,22 @@ auth_openfile(const char *file, struct passwd *pw, int strict_modes,
 	struct stat st;
 	int fd;
 	FILE *f;
-	
-#ifdef WIN32_FIXME
-    if ((fd = WSHELPwopen(file, O_RDONLY|O_NONBLOCK)) == -1) {
-#else
+
+#ifdef WINDOWS
+        /* Windows POSIX adapter does not support fdopen() on open(file)*/
+        if ((f = fopen(file, "r")) == NULL) {
+                debug("Could not open %s '%s': %s", file_type, file,
+                        strerror(errno));
+                return NULL;
+        }
+	if (strict_modes && check_secure_file_permission(file, pw) != 0) {
+		fclose(f);
+		logit("Authentication refused.");
+		auth_debug_add("Ignored %s", file_type);
+		return NULL;
+	}
+#else  /* !WINDOWS */
 	if ((fd = open(file, O_RDONLY|O_NONBLOCK)) == -1) {
-#endif
 		if (log_missing || errno != ENOENT)
 			debug("Could not open %s '%s': %s", file_type, file,
 			   strerror(errno));
@@ -668,20 +545,19 @@ auth_openfile(const char *file, struct passwd *pw, int strict_modes,
 		close(fd);
 		return NULL;
 	}
-#ifndef WIN32_FIXME
 	unset_nonblock(fd);
-#endif
 	if ((f = fdopen(fd, "r")) == NULL) {
 		close(fd);
 		return NULL;
 	}
 	if (strict_modes &&
-	    secure_filename(f, file, pw, line, sizeof(line)) != 0) {
+	    safe_path_fd(fileno(f), file, pw, line, sizeof(line)) != 0) {
 		fclose(f);
 		logit("Authentication refused: %s", line);
 		auth_debug_add("Ignored %s: %s", file_type, line);
 		return NULL;
 	}
+#endif  /* !WINDOWS */
 
 	return f;
 }
@@ -703,6 +579,7 @@ auth_openprincipals(const char *file, struct passwd *pw, int strict_modes)
 struct passwd *
 getpwnamallow(const char *user)
 {
+	struct ssh *ssh = active_state; /* XXX */
 #ifdef HAVE_LOGIN_CAP
 	extern login_cap_t *lc;
 #ifdef BSD_AUTH
@@ -714,6 +591,8 @@ getpwnamallow(const char *user)
 
 	ci->user = user;
 	parse_server_match_config(&options, ci);
+	log_change_level(options.log_level);
+	process_permitopen(ssh, &options);
 
 #if defined(_AIX) && defined(HAVE_SETAUTHDB)
 	aix_setauthdb(user);
@@ -738,11 +617,11 @@ getpwnamallow(const char *user)
 	}
 #endif
 	if (pw == NULL) {
-		logit("Invalid user %.100s from %.100s",
-		    user, get_remote_ipaddr());
+		logit("Invalid user %.100s from %.100s port %d",
+		    user, ssh_remote_ipaddr(ssh), ssh_remote_port(ssh));
 #ifdef CUSTOM_FAILED_LOGIN
 		record_failed_login(user,
-		    get_canonical_hostname(options.use_dns), "ssh");
+		    auth_get_canonical_hostname(ssh, options.use_dns), "ssh");
 #endif
 #ifdef SSH_AUDIT_EVENTS
 		audit_event(SSH_INVALID_USER);
@@ -773,7 +652,7 @@ getpwnamallow(const char *user)
 
 /* Returns 1 if key is revoked by revoked_keys_file, 0 otherwise */
 int
-auth_key_is_revoked(Key *key)
+auth_key_is_revoked(struct sshkey *key)
 {
 	char *fp = NULL;
 	int r;
@@ -871,4 +750,118 @@ fakepw(void)
 	fake.pw_shell = "/nonexist";
 
 	return (&fake);
+}
+
+/*
+ * Returns the remote DNS hostname as a string. The returned string must not
+ * be freed. NB. this will usually trigger a DNS query the first time it is
+ * called.
+ * This function does additional checks on the hostname to mitigate some
+ * attacks on legacy rhosts-style authentication.
+ * XXX is RhostsRSAAuthentication vulnerable to these?
+ * XXX Can we remove these checks? (or if not, remove RhostsRSAAuthentication?)
+ */
+
+static char *
+remote_hostname(struct ssh *ssh)
+{
+	struct sockaddr_storage from;
+	socklen_t fromlen;
+	struct addrinfo hints, *ai, *aitop;
+	char name[NI_MAXHOST], ntop2[NI_MAXHOST];
+	const char *ntop = ssh_remote_ipaddr(ssh);
+
+	/* Get IP address of client. */
+	fromlen = sizeof(from);
+	memset(&from, 0, sizeof(from));
+	if (getpeername(ssh_packet_get_connection_in(ssh),
+	    (struct sockaddr *)&from, &fromlen) < 0) {
+		debug("getpeername failed: %.100s", strerror(errno));
+		return strdup(ntop);
+	}
+
+	ipv64_normalise_mapped(&from, &fromlen);
+	if (from.ss_family == AF_INET6)
+		fromlen = sizeof(struct sockaddr_in6);
+
+	debug3("Trying to reverse map address %.100s.", ntop);
+	/* Map the IP address to a host name. */
+	if (getnameinfo((struct sockaddr *)&from, fromlen, name, sizeof(name),
+	    NULL, 0, NI_NAMEREQD) != 0) {
+		/* Host name not found.  Use ip address. */
+		return strdup(ntop);
+	}
+
+	/*
+	 * if reverse lookup result looks like a numeric hostname,
+	 * someone is trying to trick us by PTR record like following:
+	 *	1.1.1.10.in-addr.arpa.	IN PTR	2.3.4.5
+	 */
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_socktype = SOCK_DGRAM;	/*dummy*/
+	hints.ai_flags = AI_NUMERICHOST;
+	if (getaddrinfo(name, NULL, &hints, &ai) == 0) {
+		logit("Nasty PTR record \"%s\" is set up for %s, ignoring",
+		    name, ntop);
+		freeaddrinfo(ai);
+		return strdup(ntop);
+	}
+
+	/* Names are stored in lowercase. */
+	lowercase(name);
+
+	/*
+	 * Map it back to an IP address and check that the given
+	 * address actually is an address of this host.  This is
+	 * necessary because anyone with access to a name server can
+	 * define arbitrary names for an IP address. Mapping from
+	 * name to IP address can be trusted better (but can still be
+	 * fooled if the intruder has access to the name server of
+	 * the domain).
+	 */
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = from.ss_family;
+	hints.ai_socktype = SOCK_STREAM;
+	if (getaddrinfo(name, NULL, &hints, &aitop) != 0) {
+		logit("reverse mapping checking getaddrinfo for %.700s "
+		    "[%s] failed.", name, ntop);
+		return strdup(ntop);
+	}
+	/* Look for the address from the list of addresses. */
+	for (ai = aitop; ai; ai = ai->ai_next) {
+		if (getnameinfo(ai->ai_addr, ai->ai_addrlen, ntop2,
+		    sizeof(ntop2), NULL, 0, NI_NUMERICHOST) == 0 &&
+		    (strcmp(ntop, ntop2) == 0))
+				break;
+	}
+	freeaddrinfo(aitop);
+	/* If we reached the end of the list, the address was not there. */
+	if (ai == NULL) {
+		/* Address not found for the host name. */
+		logit("Address %.100s maps to %.600s, but this does not "
+		    "map back to the address.", ntop, name);
+		return strdup(ntop);
+	}
+	return strdup(name);
+}
+
+/*
+ * Return the canonical name of the host in the other side of the current
+ * connection.  The host name is cached, so it is efficient to call this
+ * several times.
+ */
+
+const char *
+auth_get_canonical_hostname(struct ssh *ssh, int use_dns)
+{
+	static char *dnsname;
+
+	if (!use_dns)
+		return ssh_remote_ipaddr(ssh);
+	else if (dnsname != NULL)
+		return dnsname;
+	else {
+		dnsname = remote_hostname(ssh);
+		return dnsname;
+	}
 }

@@ -1,4 +1,4 @@
-/* $OpenBSD: ssh-pkcs11-client.c,v 1.5 2014/06/24 01:13:21 djm Exp $ */
+/* $OpenBSD: ssh-pkcs11-client.c,v 1.7 2017/05/30 08:52:19 markus Exp $ */
 /*
  * Copyright (c) 2010 Markus Friedl.  All rights reserved.
  *
@@ -106,7 +106,7 @@ static int
 pkcs11_rsa_private_encrypt(int flen, const u_char *from, u_char *to, RSA *rsa,
     int padding)
 {
-	Key key;
+	struct sshkey key;	/* XXX */
 	u_char *blob, *signature = NULL;
 	u_int blen, slen = 0;
 	int ret = -1;
@@ -156,14 +156,6 @@ static int
 pkcs11_start_helper(void)
 {
 	int pair[2];
-  #ifdef WIN32_FIXME
-  if (socketpair(pair) == -1) 
-  {
-    error("socketpair: %s", strerror(errno));
-    return (-1);
-  }
-
-  #else
 
 	if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == -1) {
 		error("socketpair: %s", strerror(errno));
@@ -181,12 +173,11 @@ pkcs11_start_helper(void)
 		close(pair[0]);
 		close(pair[1]);
 		execlp(_PATH_SSH_PKCS11_HELPER, _PATH_SSH_PKCS11_HELPER,
-		    (char *) 0);
+		    (char *)NULL);
 		fprintf(stderr, "exec: %s: %s\n", _PATH_SSH_PKCS11_HELPER,
 		    strerror(errno));
 		_exit(1);
 	}
- #endif /*WIN32_FIXME*/
 	close(pair[1]);
 	fd = pair[0];
 	return (0);
@@ -195,7 +186,7 @@ pkcs11_start_helper(void)
 int
 pkcs11_add_provider(char *name, char *pin, Key ***keysp)
 {
-	Key *k;
+	struct sshkey *k;
 	int i, nkeys;
 	u_char *blob;
 	u_int blen;

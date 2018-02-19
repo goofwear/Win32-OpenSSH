@@ -150,6 +150,9 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
+#ifdef HAVE_SYS_TIME_H
+# include <sys/time.h>
+#endif
 
 #include <netinet/in.h>
 
@@ -527,6 +530,7 @@ getlast_entry(struct logininfo *li)
 	/* If wtmp isn't available, try wtmpx */
 	return (wtmpx_get_entry(li));
 # else
+	/* TODO - implement last_login_entry in Windows*/
 	/* Give up: No means of retrieving last login time */
 	return (0);
 # endif /* DISABLE_LASTLOG */

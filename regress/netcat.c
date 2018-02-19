@@ -61,6 +61,9 @@
 #  include <sys/poll.h>
 # endif
 #endif
+#ifdef HAVE_ERR_H
+# include <err.h>
+#endif
 
 /* Telnet options from arpa/telnet.h */
 #define IAC	255
@@ -134,55 +137,6 @@ void	usage(int);
 ssize_t drainbuf(int, unsigned char *, size_t *);
 ssize_t fillbuf(int, unsigned char *, size_t *);
 
-static void err(int, const char *, ...) __attribute__((format(printf, 2, 3)));
-static void errx(int, const char *, ...) __attribute__((format(printf, 2, 3)));
-static void warn(const char *, ...) __attribute__((format(printf, 1, 2)));
-
-#ifdef WIN32_FIXME	
-void logit(const char *fmt,...) {}
-void debug(const char *fmt,...) {}
-void debug2(const char *fmt,...) {}
-void debug3(const char *fmt,...) {}
-void error(const char *fmt,...) {}
-void fatal(const char *fmt,...) {}
-#endif
-
-static void
-err(int r, const char *fmt, ...)
-{
-	va_list args;
-
-	va_start(args, fmt);
-	fprintf(stderr, "%s: ", strerror(errno));
-	vfprintf(stderr, fmt, args);
-	fputc('\n', stderr);
-	va_end(args);
-	exit(r);
-}
-
-static void
-errx(int r, const char *fmt, ...)
-{
-	va_list args;
-
-	va_start(args, fmt);
-	vfprintf(stderr, fmt, args);
-	fputc('\n', stderr);
-	va_end(args);
-	exit(r);
-}
-
-static void
-warn(const char *fmt, ...)
-{
-	va_list args;
-
-	va_start(args, fmt);
-	fprintf(stderr, "%s: ", strerror(errno));
-	vfprintf(stderr, fmt, args);
-	fputc('\n', stderr);
-	va_end(args);
-}
 
 int
 main(int argc, char *argv[])
@@ -604,9 +558,8 @@ unix_connect(char *path)
 		if ((s = socket(AF_UNIX, SOCK_STREAM, 0)) < 0)
 			return (-1);
 	}
-#ifndef WIN32_FIXME	
 	(void)fcntl(s, F_SETFD, FD_CLOEXEC);
-#endif
+
 	memset(&sun_sa, 0, sizeof(struct sockaddr_un));
 	sun_sa.sun_family = AF_UNIX;
 
@@ -716,13 +669,12 @@ timeout_connect(int s, const struct sockaddr *name, socklen_t namelen)
 	socklen_t optlen;
 	int flags = 0, optval;
 	int ret;
-#ifndef WIN32_FIXME
+
 	if (timeout != -1) {
 		flags = fcntl(s, F_GETFL, 0);
 		if (fcntl(s, F_SETFL, flags | O_NONBLOCK) == -1)
 			err(1, "set non-blocking mode");
 	}
-#endif
 
 	if ((ret = connect(s, name, namelen)) != 0 && errno == EINPROGRESS) {
 		pfd.fd = s;
@@ -740,10 +692,10 @@ timeout_connect(int s, const struct sockaddr *name, socklen_t namelen)
 		} else
 			err(1, "poll failed");
 	}
-#ifndef WIN32_FIXME
+
 	if (timeout != -1 && fcntl(s, F_SETFL, flags) == -1)
 		err(1, "restoring flags");
-#endif
+
 	return (ret);
 }
 
@@ -812,13 +764,6 @@ local_listen(char *host, char *port, struct addrinfo hints)
  * readwrite()
  * Loop that polls on the network file descriptor and stdin.
  */
-
-#ifdef WIN32_FIXME
-#define POLLNVAL 0x0020
-#define	POLLHUP		0x0010
-#define RPP_REQUIRE_TTY 0x02 /* Fail if there is no tty. */
-#endif
- 
 void
 readwrite(int net_fd)
 {
@@ -1268,9 +1213,7 @@ map_tos(char *s, int *val)
 		{ "af41",		IPTOS_DSCP_AF41 },
 		{ "af42",		IPTOS_DSCP_AF42 },
 		{ "af43",		IPTOS_DSCP_AF43 },
-#ifndef WIN32_FIXME
 		{ "critical",		IPTOS_PREC_CRITIC_ECP },
-#endif		
 		{ "cs0",		IPTOS_DSCP_CS0 },
 		{ "cs1",		IPTOS_DSCP_CS1 },
 		{ "cs2",		IPTOS_DSCP_CS2 },
@@ -1280,13 +1223,9 @@ map_tos(char *s, int *val)
 		{ "cs6",		IPTOS_DSCP_CS6 },
 		{ "cs7",		IPTOS_DSCP_CS7 },
 		{ "ef",			IPTOS_DSCP_EF },
-#ifndef WIN32_FIXME		
 		{ "inetcontrol",	IPTOS_PREC_INTERNETCONTROL },
-#endif		
 		{ "lowdelay",		IPTOS_LOWDELAY },
-#ifndef WIN32_FIXME			
 		{ "netcontrol",		IPTOS_PREC_NETCONTROL },
-#endif		
 		{ "reliability",	IPTOS_RELIABILITY },
 		{ "throughput",		IPTOS_THROUGHPUT },
 		{ NULL, 		-1 },
@@ -1496,10 +1435,8 @@ getproxypass(const char *proxyuser, const char *proxyhost)
 
 	snprintf(prompt, sizeof(prompt), "Proxy password for %s@%s: ",
 	   proxyuser, proxyhost);
-#ifndef WIN32_FIXME	   
 	if (readpassphrase(prompt, pw, sizeof(pw), RPP_REQUIRE_TTY) == NULL)
 		errx(1, "Unable to read proxy passphrase");
-#endif	
 	return (pw);
 }
 

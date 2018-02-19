@@ -6,11 +6,13 @@
 /* Define if building universal (internal helper macro) */
 /* #undef AC_APPLE_UNIVERSAL_BUILD */
 
-/* Define if you have a getaddrinfo that fails for the all-zeros IPv6 address
+/* Define if you have a getaddrinfo that fails
+ for the all-zeros IPv6 address
    */
 /* #undef AIX_GETNAMEINFO_HACK */
 
-/* Define if your AIX loginfailed() function takes 4 arguments (AIX >= 5.2)
+/* Define if your AIX loginfailed() function
+ takes 4 arguments (AIX >= 5.2)
    */
 /* #undef AIX_LOGINFAILED_4ARG */
 
@@ -32,7 +34,8 @@
 /* FreeBSD glob does not do what we need */
 /* #undef BROKEN_GLOB */
 
-/* Define if you system's inet_ntoa is busted (e.g. Irix gcc issue) */
+/* Define if you system's inet_ntoa is busted
+ (e.g. Irix gcc issue) */
 /* #undef BROKEN_INET_NTOA */
 
 /* ia_uinfo routines not supported by OS yet */
@@ -41,7 +44,8 @@
 /* Ultrix mmap can't map files */
 /* #undef BROKEN_MMAP */
 
-/* Define if your struct dirent expects you to allocate extra space for
+/* Define if your struct dirent expects you to
+ allocate extra space for
    d_name */
 /* #undef BROKEN_ONE_BYTE_DIRENT_D_NAME */
 
@@ -76,7 +80,7 @@
 /* #undef BROKEN_SNPRINTF */
 
 /* tcgetattr with ICANON may hang */
-/* #undef BROKEN_TCGETATTR_ICANON */
+#define BROKEN_TCGETATTR_ICANON 1
 
 /* updwtmpx is broken (if present) */
 /* #undef BROKEN_UPDWTMPX */
@@ -96,19 +100,23 @@
 /* Define if you want to specify the path to your wtmp file */
 /* #undef CONF_WTMP_FILE */
 
-/* Define if your platform needs to skip post auth file descriptor passing */
-#define DISABLE_FD_PASSING 1
+/* Define if your platform needs to skip post auth
+ file descriptor passing */
+/* #undef DISABLE_FD_PASSING */
 
 /* Define if you don't want to use lastlog */
 /* #undef DISABLE_LASTLOG */
 
-/* Define if you don't want to use your system's login() call */
+/* Define if you don't want to use your
+ system's login() call */
 /* #undef DISABLE_LOGIN */
 
-/* Define if you don't want to use pututline() etc. to write [uw]tmp */
+/* Define if you don't want to use pututline()
+ etc. to write [uw]tmp */
 /* #undef DISABLE_PUTUTLINE */
 
-/* Define if you don't want to use pututxline() etc. to write [uw]tmpx */
+/* Define if you don't want to use pututxline()
+ etc. to write [uw]tmpx */
 /* #undef DISABLE_PUTUTXLINE */
 
 /* Define if you want to disable shadow passwords */
@@ -127,7 +135,7 @@
 #define DISABLE_WTMPX 1
 
 /* Enable for PKCS#11 support */
-#define ENABLE_PKCS11 1
+/* #undef ENABLE_PKCS11 */
 
 /* File names may not contain backslash characters */
 /* #undef FILESYSTEM_NO_BACKSLASH */
@@ -144,22 +152,27 @@
 /* Conflicting defs for getspnam */
 /* #undef GETSPNAM_CONFLICTING_DEFS */
 
-/* Define if your system glob() function has the GLOB_ALTDIRFUNC extension */
+/* Define if your system glob() function has
+ the GLOB_ALTDIRFUNC extension */
 /* #undef GLOB_HAS_ALTDIRFUNC */
 
-/* Define if your system glob() function has gl_matchc options in glob_t */
+/* Define if your system glob() function has
+ gl_matchc options in glob_t */
 #define GLOB_HAS_GL_MATCHC 1
 
-/* Define if your system glob() function has gl_statv options in glob_t */
+/* Define if your system glob() function has
+ gl_statv options in glob_t */
 #define GLOB_HAS_GL_STATV 1
 
-/* Define this if you want GSSAPI support in the version 2 protocol */
-#define GSSAPI 1
+/* Define this if you want GSSAPI
+ support in the version 2 protocol */
+/* #undef GSSAPI */
 
 /* Define if you want to use shadow password expire field */
 /* #undef HAS_SHADOW_EXPIRE */
 
-/* Define if your system uses access rights style file descriptor passing */
+/* Define if your system uses access rights style
+ file descriptor passing */
 /* #undef HAVE_ACCRIGHTS_IN_MSGHDR */
 
 /* Define if you have ut_addr in utmp.h */
@@ -234,7 +247,8 @@
 /* Define if gai_strerror() returns const char * */
 /* #undef HAVE_CONST_GAI_STRERROR_PROTO */
 
-/* Define if your system uses ancillary data style file descriptor passing */
+/* Define if your system uses ancillary data style
+ file descriptor passing */
 /* #undef HAVE_CONTROL_IN_MSGHDR */
 
 /* Define to 1 if you have the <crypto/sha2.h> header file. */
@@ -283,7 +297,7 @@
 
 /* Define to 1 if you have the declaration of `O_NONBLOCK', and to 0 if you
    don't. */
-#define HAVE_DECL_O_NONBLOCK 0
+#define HAVE_DECL_O_NONBLOCK 1
 
 /* Define to 1 if you have the declaration of `passwdexpired', and to 0 if you
    don't. */
@@ -322,7 +336,7 @@
 /* #undef HAVE_DIRFD */
 
 /* Define to 1 if you have the `dirname' function. */
-#define HAVE_DIRNAME 1
+/* #define HAVE_DIRNAME 1 */
 
 /* Define to 1 if you have the `DSA_generate_parameters_ex' function. */
 #define HAVE_DSA_GENERATE_PARAMETERS_EX 1
@@ -376,7 +390,7 @@
 /* #undef HAVE_FSFILCNT_T */
 
 /* Define to 1 if you have the `fstatvfs' function. */
-/* #undef HAVE_FSTATVFS */
+#define HAVE_FSTATVFS 1
 
 /* Define to 1 if you have the `futimes' function. */
 /* #undef HAVE_FUTIMES */
@@ -421,7 +435,7 @@
 /* #undef HAVE_GETOPT_OPTRESET */
 
 /* Define if your libraries define getpagesize() */
-#define HAVE_GETPAGESIZE 1
+/* #undef HAVE_GETPAGESIZE */
 
 /* Define to 1 if you have the `getpeereid' function. */
 /* #undef HAVE_GETPEEREID */
@@ -529,7 +543,7 @@
 /* #undef HAVE_INET_NTOA */
 
 /* Define to 1 if you have the `inet_ntop' function. */
-/* #undef HAVE_INET_NTOP */
+#define HAVE_INET_NTOP 1
 
 /* Define to 1 if you have the `innetgr' function. */
 /* #undef HAVE_INNETGR */
@@ -568,7 +582,7 @@
 /* #undef HAVE_LIBDL */
 
 /* Define to 1 if you have the <libgen.h> header file. */
-/* #undef HAVE_LIBGEN_H
+#define HAVE_LIBGEN_H 1
 
 /* Define if system has libiaf that supports set_id */
 /* #undef HAVE_LIBIAF */
@@ -675,7 +689,8 @@
 /* Define to 1 if you have the `ogetaddrinfo' function. */
 /* #undef HAVE_OGETADDRINFO */
 
-/* Define if you have an old version of PAM which takes only one argument to
+/* Define if you have an old version of PAM
+ which takes only one argument to
    pam_strerror */
 /* #undef HAVE_OLD_PAM */
 
@@ -685,11 +700,13 @@
 /* Define to 1 if you have the `openpty' function. */
 /* #undef HAVE_OPENPTY */
 
-/* Define if your ssl headers are included with #include <openssl/header.h>
+/* Define if your ssl headers are included
+ with #include <openssl/header.h>
    */
 #define HAVE_OPENSSL 1
 
-/* Define if you have Digital Unix Security Integration Architecture */
+/* Define if you have Digital Unix Security
+ Integration Architecture */
 /* #undef HAVE_OSF_SIA */
 
 /* Define to 1 if you have the `pam_getenvlist' function. */
@@ -714,7 +731,7 @@
 /* #undef HAVE_POLL */
 
 /* Define to 1 if you have the <poll.h> header file. */
-/* #undef HAVE_POLL_H */
+#define HAVE_POLL_H 1
 
 /* Define to 1 if you have the `prctl' function. */
 /* #undef HAVE_PRCTL */
@@ -753,7 +770,7 @@
 /* #undef HAVE_READPASSPHRASE_H */
 
 /* Define to 1 if you have the `realpath' function. */
-/* #undef HAVE_REALPATH */
+/* #define HAVE_REALPATH 1 */
 
 /* Define to 1 if you have the `recvmsg' function. */
 /* #undef HAVE_RECVMSG */
@@ -782,7 +799,8 @@
 /* define if you have sa_family_t data type */
 /* #undef HAVE_SA_FAMILY_T */
 
-/* Define if you have SecureWare-based protected password database */
+/* Define if you have SecureWare-based
+ protected password database */
 /* #undef HAVE_SECUREWARE */
 
 /* Define to 1 if you have the <security/pam_appl.h> header file. */
@@ -840,7 +858,7 @@
 /* #undef HAVE_SETRLIMIT */
 
 /* Define to 1 if you have the `setsid' function. */
-/* #undef HAVE_SETSID */
+#define HAVE_SETSID 1
 
 /* Define to 1 if you have the `setutent' function. */
 /* #undef HAVE_SETUTENT */
@@ -858,7 +876,7 @@
 /* #undef HAVE_SET_ID */
 
 /* Define to 1 if you have the `SHA256_Update' function. */
-#define HAVE_SHA256_UPDATE 1
+/* #undef HAVE_SHA256_UPDATE */
 
 /* Define to 1 if you have the <sha2.h> header file. */
 /* #undef HAVE_SHA2_H */
@@ -897,7 +915,7 @@
 /* #undef HAVE_STATFS */
 
 /* Define to 1 if you have the `statvfs' function. */
-/* #undef HAVE_STATVFS */
+#define HAVE_STATVFS 1
 
 /* Define to 1 if you have the <stddef.h> header file. */
 #define HAVE_STDDEF_H 1
@@ -921,7 +939,7 @@
 /* #undef HAVE_STRICT_MKSTEMP */
 
 /* Define to 1 if you have the <strings.h> header file. */
-/* #undef HAVE_STRINGS_H 
+#define HAVE_STRINGS_H 1
 
 /* Define to 1 if you have the <string.h> header file. */
 #define HAVE_STRING_H 1
@@ -1029,10 +1047,10 @@
 /* #undef HAVE_SYS_PTMS_H */
 
 /* Define to 1 if you have the <sys/select.h> header file. */
-/* #undef HAVE_SYS_SELECT_H */
+#define HAVE_SYS_SELECT_H 1
 
 /* Define to 1 if you have the <sys/statvfs.h> header file. */
-/* #undef HAVE_SYS_STATVFS_H */
+#define HAVE_SYS_STATVFS_H 1
 
 /* Define to 1 if you have the <sys/stat.h> header file. */
 #define HAVE_SYS_STAT_H 1
@@ -1056,13 +1074,13 @@
 /* #undef HAVE_SYS_TIMERS_H */
 
 /* Define to 1 if you have the <sys/time.h> header file. */
-/* #undef HAVE_SYS_TIME_H 
+#define HAVE_SYS_TIME_H  1
 
 /* Define to 1 if you have the <sys/types.h> header file. */
 #define HAVE_SYS_TYPES_H 1
 
 /* Define to 1 if you have the <sys/un.h> header file. */
-/* #undef HAVE_SYS_UN_H */
+#define HAVE_SYS_UN_H 1
 
 /* Define to 1 if you have the `tcgetpgrp' function. */
 /* #undef HAVE_TCGETPGRP */
@@ -1134,13 +1152,13 @@
 /* #undef HAVE_USERSEC_H */
 
 /* Define to 1 if you have the `user_from_uid' function. */
-/* #undef HAVE_USER_FROM_UID */
+#define HAVE_USER_FROM_UID 1
 
 /* Define to 1 if you have the <util.h> header file. */
 /* #undef HAVE_UTIL_H */
 
 /* Define to 1 if you have the `utimes' function. */
-/* #undef HAVE_UTIMES */
+#define HAVE_UTIMES 1
 
 /* Define to 1 if you have the <utime.h> header file. */
 /* #undef HAVE_UTIME_H */
@@ -1185,7 +1203,7 @@
 #define HAVE_VSNPRINTF 1
 
 /* Define to 1 if you have the `waitpid' function. */
-/* #undef HAVE_WAITPID */
+#define HAVE_WAITPID 1
 
 /* Define to 1 if you have the `_getlong' function. */
 /* #undef HAVE__GETLONG */
@@ -1220,28 +1238,33 @@
 /* Define if compiler implements __func__ */
 #define HAVE___func__ 1
 
-/* Define this if you are using the Heimdal version of Kerberos V5 */
+/* Define this if you are using the Heimdal
+ version of Kerberos V5 */
 /* #undef HEIMDAL */
 
-/* Define if you need to use IP address instead of hostname in $DISPLAY */
+/* Define if you need to use IP address
+ instead of hostname in $DISPLAY */
 /* #undef IPADDR_IN_DISPLAY */
 
-/* Detect IPv4 in IPv6 mapped addresses and treat as IPv4 */
+/* Detect IPv4 in IPv6 mapped addresses
+ and treat as IPv4 */
 /* #undef IPV4_IN_IPV6 */
 
 /* Define if your system choked on IP TOS setting */
 #define IP_TOS_IS_BROKEN 1
 
 /* Define if you want Kerberos 5 support */
-#define KRB5 1
+/* #undef KRB5 */
 
 /* Define if pututxline updates lastlog too */
 /* #undef LASTLOG_WRITE_PUTUTXLINE */
 
-/* Define if you want TCP Wrappers support */
+/* Define if you want
+ TCP Wrappers support */
 /* #undef LIBWRAP */
 
-/* Define to whatever link() returns for "not supported" if it doesn't return
+/* Define to whatever link() returns for "not supported"
+ if it doesn't return
    EOPNOTSUPP. */
 /* #undef LINK_OPNOTSUPP_ERRNO */
 
@@ -1263,7 +1286,8 @@
 /* String used in /etc/passwd to denote locked account */
 /* #undef LOCKED_PASSWD_SUBSTR */
 
-/* Some versions of /bin/login need the TERM supplied on the commandline */
+/* Some versions of /bin/login need the TERM supplied
+ on the commandline */
 /* #undef LOGIN_NEEDS_TERM */
 
 /* Some systems need a utmpx entry for /bin/login to work */
@@ -1272,7 +1296,8 @@
 /* Define if your login program cannot handle end of options ("--") */
 /* #undef LOGIN_NO_ENDOPT */
 
-/* If your header files don't define LOGIN_PROGRAM, then use this (detected)
+/* If your header files don't define LOGIN_PROGRAM,
+ then use this (detected)
    from environment and PATH */
 #define LOGIN_PROGRAM_FALLBACK "/usr/bin/login"
 
@@ -1291,7 +1316,8 @@
 /* Need setpgrp to acquire controlling tty */
 /* #undef NEED_SETPGRP */
 
-/* Define if the concept of ports only accessible to superusers isn't known
+/* Define if the concept of ports only accessible to
+ superusers isn't known
    */
 #define NO_IPPORT_RESERVED_CONCEPT 1
 
@@ -1306,6 +1332,7 @@
 
 /* libcrypto includes complete ECC support */
 #define OPENSSL_HAS_ECC 1
+#define OPENSSL_HAS_NISTP521 1
 
 /* libcrypto is missing AES 192 and 256 bit functions */
 /* #undef OPENSSL_LOBOTOMISED_AES */
@@ -1331,8 +1358,10 @@
 /* Define to the version of this package. */
 #define PACKAGE_VERSION "Portable"
 
-/* Define if you are using Solaris-derived PAM which passes pam_messages to
-   the conversation function with an extra level of indirection */
+/* Define if you are using Solaris-derived PAM which
+ passes pam_messages to
+   the conversation function
+ with an extra level of indirection */
 /* #undef PAM_SUN_CODEBASE */
 
 /* Work around problematic Linux PAM modules handling of PAM_TTY */
@@ -1383,20 +1412,24 @@
 /* Define if you want S/Key support */
 /* #undef SKEY */
 
-/* Define if your skeychallenge() function takes 4 arguments (NetBSD) */
+/* Define if your skeychallenge()
+ function takes 4 arguments (NetBSD) */
 /* #undef SKEYCHALLENGE_4ARG */
 
 /* Define as const if snprintf() can declare const char *fmt */
 #define SNPRINTF_CONST const
 
-/* Define to a Set Process Title type if your system is supported by
+/* Define to a Set Process Title type if your system is
+ supported by
    bsd-setproctitle.c */
 /* #undef SPT_TYPE */
 
-/* Define if sshd somehow reacquires a controlling TTY after setsid() */
+/* Define if sshd somehow reacquires a controlling TTY
+ after setsid() */
 /* #undef SSHD_ACQUIRES_CTTY */
 
-/* Define if pam_chauthtok wants real uid set to the unpriv'ed user */
+/* Define if pam_chauthtok wants real uid set
+ to the unpriv'ed user */
 /* #undef SSHPAM_CHAUTHTOK_NEEDS_RUID */
 
 /* Use audit debugging module */
@@ -1429,7 +1462,8 @@
 /* Define to 1 if you have the ANSI C header files. */
 #define STDC_HEADERS 1
 
-/* Define if you want a different $PATH for the superuser */
+/* Define if you want a different $PATH
+ for the superuser */
 /* #undef SUPERUSER_PATH */
 
 /* syslog_r function is safe to use in in a signal handler */
@@ -1474,13 +1508,15 @@
 /* Define if you have Solaris projects */
 /* #undef USE_SOLARIS_PROJECTS */
 
-/* Define if you shouldn't strip 'tty' from your ttyname in [uw]tmp */
+/* Define if you shouldn't strip 'tty' from your
+ ttyname in [uw]tmp */
 /* #undef WITH_ABBREV_NO_TTY */
 
 /* Define if you want to enable AIX4's authenticate function */
 /* #undef WITH_AIXAUTHENTICATE */
 
-/* Define if you have/want arrays (cluster-wide session managment, not C
+/* Define if you have/want arrays
+ (cluster-wide session managment, not C
    arrays) */
 /* #undef WITH_IRIX_ARRAY */
 
@@ -1529,7 +1565,7 @@
 #define _PATH_PASSWD_PROG "/usr/bin/passwd"
 
 /* Specify location of ssh.pid */
-#define _PATH_SSH_PIDDIR "/var/run"
+#define _PATH_SSH_PIDDIR "."
 
 /* Define if we don't have struct __res_state in resolv.h */
 #define __res_state state
@@ -1543,20 +1579,7 @@
 /* type to use in place of socklen_t if not defined */
 /* #undef socklen_t */
 #define WIN32_LEAN_AND_MEAN 1
-#define _CRT_SECURE_NO_DEPRECATE 1
-#define _CRT_NONSTDC_NO_DEPRECATE 1
-#define WIN32_FIXME 1
-#undef USE_NTCREATETOKEN
-
-/* Define if you must implement a startup_needs function for your platform */
-#define HAVE_STARTUP_NEEDS 1
-
-/* Define if your platform uses Winsock instead of BSD sockets (yeah, there are a lot of platforms like this :) */
-#define HAVE_WINSOCK 1
-
-#ifndef WIN32
-#define snprintf _snprintf
-#endif
+#define WINDOWS 1
 
 #define BROKEN_READV_COMPARISON
 
@@ -1577,15 +1600,12 @@
 #define HAVE_INET_NTOA 1
 #define HAVE_INNETGR 1
 #undef HAVE_LIBCRYPT
-#define HAVE_MKDTEMP 1
 #define HAVE_NANOSLEEP 1
 #undef HAVE_PATHS_H
-#undef HAVE_POLL_H
 #undef HAVE_PROC_PID
 #undef HAVE_PTY_H
 #define HAVE_NANOSLEEP 1
 #define HAVE_READPASSPHRASE 1
-#define HAVE_REALPATH 1
 #undef HAVE_SIG_ATOMIC_T
 #define HAVE_SIZE_T 1
 #undef HAVE_STRERROR
@@ -1600,19 +1620,20 @@
 #define HAVE_STRNCASECMP 1
 #endif
 
+/* Define to 1 if you have the locale.h header. */
+#define HAVE_LOCALE_H 1
+
 #define HAVE_STRUCT_IN6_ADDR 1
 #define HAVE_STRUCT_SOCKADDR_IN6 1
 #define HAVE_STRUCT_TIMEVAL 1
 #undef HAVE_SYS_CDEFS_H
 #undef HAVE_SYS_SYSMACROS_H
 #undef HAVE_SYS_MMAN_H
-#undef HAVE_SYS_UN_H
+#define _STRUCT_WINSIZE 1
 
 #define HAVE_TCGETPGRP 1
 
 #undef HAVE_TIME
-
-#define HAVE_TRUNCATE 1
 
 #define HAVE_VIS_H 1
 
@@ -1633,81 +1654,46 @@
 
 #define BROKEN_SYS_TERMIO_H
 
-#define strerror strerror_win32
 
-#define strerror strerror_win32
-
-// PRAGMA SYS PORT
 #define WITH_OPENSSL 1
-#define HAVE_KRB5_GET_ERROR_MESSAGE 1
-#define HAVE_KRB5_FREE_ERROR_MESSAGE 1
 #define HAVE_DECL_NFDBITS 0
 #define HAVE_DECL_HOWMANY 0
-
-#define WIN32_ZLIB_NO 1
-#define USE_MSCNG 1
-
-typedef unsigned long pid_t;
-
-#ifndef ssize_t
-#ifdef _WIN64
-typedef __int64		 ssize_t;
-#else
-typedef long ssize_t;
-#endif
-#endif
-
-#ifndef _WIN32
-#define HAVE_POLL 1
-#endif
 #define HAVE_STRTOULL 1
-#undef HAVE_USLEEP
+#define HAVE_USLEEP 1
+#define HAVE_EVP_RIPEMD160 1
 
 #if defined ( WIN32 )
 #define __func__ __FUNCTION__
 #endif
 
+/* Windows specific macro added to workaround mysignal implementaion in bsd-misc.c */
+#define HAVE_MYSIGNAL 1
+
+
 #define PATH_MAX MAX_PATH
-
-//#define IN_LOOPBACKNET INADDR_LOOPBACK
-
 #define S_IFIFO        0x1000  
-//#define SHUT_RDWR	   2
-//#define SHUT_WR		   1
-//#define SHUT_RD        0
-
-
 #define HAVE_EXPLICIT_BZERO
-#define explicit_bzero(p,l) memset((void *)(p),0,(size_t)(l))
-#define bzero(p,l) memset((void *)(p),0,(size_t)(l))
-
-#define WIN32_ZLIB_NO 1
-
-
-#ifdef WIN32
-typedef unsigned short _mode_t;
-typedef _mode_t mode_t;
-#endif
-
+#define HAVE_MBTOWC 1
+#define HAVE_LLABS 1
 
 #include <signal.h>
 #include <io.h>
 
-
-
-struct iovec
-{
-	void *iov_base;
-	size_t iov_len;
-};
-
-
-
 #define __attribute__(A)
 
-// define building with MS Visual Studio Compiler and runtime and not with MingW/gcc compiler
-#define WIN32_VS 1
-// Use Pragma Systems Remote Console modules for shell sessions so that cmd/powershell fully
-// works remotely over SSH like they operate in a local machine
-//#define WIN32_PRAGMA_REMCON
+/* disable inclusion of compatability definitions in CRT headers */
+#define __STDC__ 1
 
+#define umac128_new umac_new
+#define umac128_update umac_update 
+#define umac_final umac128_final
+#define umac_delete umac128_delete
+
+#define HAVE_MBLEN 1
+
+#define _PATH_PRIVSEP_CHROOT_DIR "."
+#define SSHDIR "__PROGRAMDATA__\\ssh"
+#define _PATH_SFTP_SERVER "sftp-server.exe"
+#define _PATH_SSH_PROGRAM "ssh.exe"
+#define _PATH_LS			"dir"
+#define FORK_NOT_SUPPORTED 1

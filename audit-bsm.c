@@ -1,5 +1,3 @@
-/* $Id: audit-bsm.c,v 1.8 2012/02/23 23:40:43 dtucker Exp $ */
-
 /*
  * TODO
  *
@@ -35,16 +33,6 @@
 /* #pragma ident	"@(#)bsmaudit.c	1.1	01/09/17 SMI" */
 
 #include "includes.h"
-
-/*
- * We support only client side kerberos on Windows.
- */
-
-#ifdef WIN32_FIXME
-  #undef GSSAPI
-  #undef KRB5
-#endif
-
 #if defined(USE_BSM_AUDIT)
 
 #include <sys/types.h>

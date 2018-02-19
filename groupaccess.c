@@ -25,15 +25,6 @@
 
 #include "includes.h"
 
-/*
- * We support only client side kerberos on Windows.
- */
-
-#ifdef WIN32_FIXME
-  #undef GSSAPI
-  #undef KRB5
-#endif
-
 #include <sys/types.h>
 
 #include <grp.h>
@@ -42,6 +33,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#ifdef WINDOWS
+#include <lm.h>
+#include <wchar.h>
+#endif
 
 #include "xmalloc.h"
 #include "groupaccess.h"
@@ -58,7 +53,14 @@ static char **groups_byname;
 int
 ga_init(const char *user, gid_t base)
 {
-#ifndef WIN32_FIXME
+#ifdef WINDOWS
+	ngroups = 0;
+	groups_byname = NULL;
+
+	groups_byname = getusergroups(user, &ngroups);
+	return ngroups;
+#else /* !WINDOWS */
+	
 	gid_t *groups_bygid;
 	int i, j;
 	struct group *gr;
@@ -81,9 +83,7 @@ ga_init(const char *user, gid_t base)
 			groups_byname[j++] = xstrdup(gr->gr_name);
 	free(groups_bygid);
 	return (ngroups = j);
-#else
-	return -1;
-#endif /* else !WIN32_FIXME */
+#endif /* !WINDOWS */	
 }
 
 /*

@@ -1,4 +1,4 @@
-/* $OpenBSD: session.c,v 1.278 2015/04/24 01:36:00 deraadt Exp $ */
+/* $OpenBSD: session.c,v 1.293 2017/10/23 05:08:00 djm Exp $ */
 /*
  * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
  *                    All rights reserved
@@ -34,16 +34,6 @@
  */
 
 #include "includes.h"
-/*
- * We support only client side kerberos on Windows.
- */
-
-#ifdef WIN32_FIXME
-  #undef GSSAPI
-  #undef KRB5
-  #define WIN32_USER_AUTH 1
-  //#define WIN32_PRAGMA_REMCON
-#endif
 
 #include <sys/types.h>
 #include <sys/param.h>
@@ -56,6 +46,7 @@
 
 #include <arpa/inet.h>
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
@@ -75,7 +66,6 @@
 #include "openbsd-compat/sys-queue.h"
 #include "xmalloc.h"
 #include "ssh.h"
-#include "ssh1.h"
 #include "ssh2.h"
 #include "sshpty.h"
 #include "packet.h"
@@ -104,25 +94,7 @@
 #include "kex.h"
 #include "monitor_wrap.h"
 #include "sftp.h"
-
-#ifdef WIN32_FIXME
-
-char *GetHomeDirFromToken(char *userName, HANDLE token);
-/*
-FIXME: GFPZR: Function stat() may be undeclared.
-*/
-#include <sys/stat.h>
-#include <winbase.h>
-
-#include <Userenv.h>
-#include <shlobj.h>
-
-#ifdef WIN32_PRAGMA_REMCON
-#include <shlwapi.h>
-#endif
-extern char HomeDirLsaW[MAX_PATH];
-
-#endif
+#include "atomicio.h"
 
 #if defined(KRB5) && defined(USE_AFS)
 #include <kafs.h>
@@ -141,35 +113,34 @@ extern char HomeDirLsaW[MAX_PATH];
 /* func */
 
 Session *session_new(void);
-void	session_set_fds(Session *, int, int, int, int, int);
+void	session_set_fds(struct ssh *, Session *, int, int, int, int, int);
 void	session_pty_cleanup(Session *);
 void	session_proctitle(Session *);
-int	session_setup_x11fwd(Session *);
-int	do_exec_pty(Session *, const char *);
-int	do_exec_no_pty(Session *, const char *);
-int	do_exec(Session *, const char *);
-void	do_login(Session *, const char *);
+int	session_setup_x11fwd(struct ssh *, Session *);
+int	do_exec_pty(struct ssh *, Session *, const char *);
+int	do_exec_no_pty(struct ssh *, Session *, const char *);
+int	do_exec(struct ssh *, Session *, const char *);
+void	do_login(struct ssh *, Session *, const char *);
+void	do_child(struct ssh *, Session *, const char *);
 #ifdef LOGIN_NEEDS_UTMPX
 static void	do_pre_login(Session *s);
 #endif
-void	do_child(Session *, const char *);
 void	do_motd(void);
 int	check_quietlogin(Session *, const char *);
 
-static void do_authenticated1(Authctxt *);
-static void do_authenticated2(Authctxt *);
+static void do_authenticated2(struct ssh *, Authctxt *);
 
-static int session_pty_req(Session *);
+static int session_pty_req(struct ssh *, Session *);
 
 /* import */
 extern ServerOptions options;
 extern char *__progname;
-extern int log_stderr;
 extern int debug_flag;
 extern u_int utmp_len;
 extern int startup_pipe;
 extern void destroy_sensitive_data(void);
 extern Buffer loginmsg;
+char *tun_fwd_ifnames; /* serverloop.c */
 
 /* original command from peer. */
 const char *original_command = NULL;
@@ -189,48 +160,14 @@ login_cap_t *lc;
 #endif
 
 static int is_child = 0;
+static int in_chroot = 0;
+
+/* File containing userauth info, if ExposeAuthInfo set */
+static char *auth_info_file = NULL;
 
 /* Name and directory of socket for authentication agent forwarding. */
 static char *auth_sock_name = NULL;
 static char *auth_sock_dir = NULL;
-
-#ifdef WIN32_FIXME
-Session *session_get(int *index)
-{
-  Session *session;
-
-  if (!index)
-  {
-    return NULL;
-  }  
-  
-  if (*index >= sessions_nalloc)
-  {
-    *index = -1;
-    return NULL;
-  }
-
-  /* 
-   * If not used, return next index 
-   */
-  
-  if (!sessions[*index].used) 
-  {
-    (*index)++;
-    return NULL;
-  }
-
-  /*
-   * If used, return session and next index 
-   */
-  
-  session = &sessions[*index];
-  
-  (*index)++;
-  return session;
-}
-
-#endif /* WIN32_FIXME */
 
 /* removes the agent forwarding socket */
 
@@ -247,9 +184,12 @@ auth_sock_cleanup_proc(struct passwd *pw)
 }
 
 static int
-auth_input_request_forwarding(struct passwd * pw)
+auth_input_request_forwarding(struct ssh *ssh, struct passwd * pw)
 {
-#ifndef WIN32_FIXME
+#ifdef WINDOWS
+	packet_send_debug("Agent forwarding not supported in Windows yet");
+	return 0;
+#else  /* !WINDOWS */
 	Channel *nc;
 	int sock = -1;
 
@@ -288,7 +228,7 @@ auth_input_request_forwarding(struct passwd * pw)
 		goto authsock_err;
 
 	/* Allocate a channel for the authentication agent socket. */
-	nc = channel_new("auth socket",
+	nc = channel_new(ssh, "auth socket",
 	    SSH_CHANNEL_AUTH_SOCKET, sock, sock, -1,
 	    CHAN_X11_WINDOW_DEFAULT, CHAN_X11_PACKET_DEFAULT,
 	    0, "auth socket", 1);
@@ -306,9 +246,7 @@ auth_input_request_forwarding(struct passwd * pw)
 	auth_sock_name = NULL;
 	auth_sock_dir = NULL;
 	return 0;
-#else
-	return 0;
-#endif
+#endif  /* !WINDOWS */
 }
 
 static void
@@ -321,761 +259,340 @@ display_loginmsg(void)
 	}
 }
 
+static void
+prepare_auth_info_file(struct passwd *pw, struct sshbuf *info)
+{
+	int fd = -1, success = 0;
+
+	if (!options.expose_userauth_info || info == NULL)
+		return;
+
+	temporarily_use_uid(pw);
+	auth_info_file = xstrdup("/tmp/sshauth.XXXXXXXXXXXXXXX");
+	if ((fd = mkstemp(auth_info_file)) == -1) {
+		error("%s: mkstemp: %s", __func__, strerror(errno));
+		goto out;
+	}
+	if (atomicio(vwrite, fd, sshbuf_mutable_ptr(info),
+	    sshbuf_len(info)) != sshbuf_len(info)) {
+		error("%s: write: %s", __func__, strerror(errno));
+		goto out;
+	}
+	if (close(fd) != 0) {
+		error("%s: close: %s", __func__, strerror(errno));
+		goto out;
+	}
+	success = 1;
+ out:
+	if (!success) {
+		if (fd != -1)
+			close(fd);
+		free(auth_info_file);
+		auth_info_file = NULL;
+	}
+	restore_uid();
+}
+
 void
-do_authenticated(Authctxt *authctxt)
+do_authenticated(struct ssh *ssh, Authctxt *authctxt)
 {
 	setproctitle("%s", authctxt->pw->pw_name);
 
 	/* setup the channel layer */
 	/* XXX - streamlocal? */
-	if (no_port_forwarding_flag ||
+	if (no_port_forwarding_flag || options.disable_forwarding ||
 	    (options.allow_tcp_forwarding & FORWARD_LOCAL) == 0)
-		channel_disable_adm_local_opens();
+		channel_disable_adm_local_opens(ssh);
 	else
-		channel_permit_all_opens();
+		channel_permit_all_opens(ssh);
 
 	auth_debug_send();
 
-	if (compat20)
-		do_authenticated2(authctxt);
-	else
-		do_authenticated1(authctxt);
+	prepare_auth_info_file(authctxt->pw, authctxt->session_info);
 
-	do_cleanup(authctxt);
+	do_authenticated2(ssh, authctxt);
+
+	do_cleanup(ssh, authctxt);
 }
 
-/*
- * Prepares for an interactive session.  This is called after the user has
- * been successfully authenticated.  During this message exchange, pseudo
- * terminals are allocated, X11, TCP/IP, and authentication agent forwardings
- * are requested, etc.
- */
-static void
-do_authenticated1(Authctxt *authctxt)
+/* Check untrusted xauth strings for metacharacters */
+static int
+xauth_valid_string(const char *s)
 {
-	Session *s;
-	char *command;
-	int success, type, screen_flag;
-	int enable_compression_after_reply = 0;
-	u_int proto_len, data_len, dlen, compression_level = 0;
+	size_t i;
 
-	s = session_new();
-	if (s == NULL) {
-		error("no more sessions");
-		return;
+	for (i = 0; s[i] != '\0'; i++) {
+		if (!isalnum((u_char)s[i]) &&
+		    s[i] != '.' && s[i] != ':' && s[i] != '/' &&
+		    s[i] != '-' && s[i] != '_')
+		return 0;
 	}
-	s->authctxt = authctxt;
-	s->pw = authctxt->pw;
+	return 1;
+}
+
+#define USE_PIPES 1
+
+#ifdef WINDOWS
+/*
+ * do_exec* on Windows
+ * - Read and set user environment variables from registry
+ * - Build subsystem cmdline path
+ * - Interactive shell/commands are executed using ssh-shellhost.exe
+ * - ssh-shellhost.exe implements server-side PTY for Windows
+ */
+
+
+#define UTF8_TO_UTF16_FATAL(o, i) do {				\
+	if (o != NULL) free(o);					\
+	if ((o = utf8_to_utf16(i)) == NULL)			\
+		fatal("%s, out of memory", __func__);		\
+} while (0)
+
+static void setup_session_vars(Session* s) {
+	wchar_t *pw_dir_w = NULL, *tmp = NULL;
+	char buf[256];
+	wchar_t wbuf[256];
+	char* laddr;
+
+	struct ssh *ssh = active_state; /* XXX */
+
+	UTF8_TO_UTF16_FATAL(pw_dir_w, s->pw->pw_dir);
+	UTF8_TO_UTF16_FATAL(tmp, s->pw->pw_name);
+	SetEnvironmentVariableW(L"USERNAME", tmp);
+	if (s->display) {
+		UTF8_TO_UTF16_FATAL(tmp, s->display);
+		SetEnvironmentVariableW(L"DISPLAY", tmp);
+	}
+	SetEnvironmentVariableW(L"USERPROFILE", pw_dir_w);
+
+	if (pw_dir_w[0] && pw_dir_w[1] == L':') {
+		SetEnvironmentVariableW(L"HOMEPATH", pw_dir_w + 2);
+		wchar_t wc = pw_dir_w[2];
+		pw_dir_w[2] = L'\0';
+		SetEnvironmentVariableW(L"HOMEDRIVE", pw_dir_w);
+		pw_dir_w[2] = wc;
+	} else {
+		SetEnvironmentVariableW(L"HOMEPATH", pw_dir_w);
+	}
+
+	snprintf(buf, sizeof buf, "%.50s %d %d",
+		ssh->remote_ipaddr, ssh->remote_port, ssh->local_port);
+	SetEnvironmentVariableA("SSH_CLIENT", buf);
+
+	laddr = get_local_ipaddr(packet_get_connection_in());
+	snprintf(buf, sizeof buf, "%.50s %d %.50s %d",
+		ssh->remote_ipaddr, ssh->remote_port, laddr, ssh->local_port);
+	free(laddr);
+	SetEnvironmentVariableA("SSH_CONNECTION", buf);
+
+	if (original_command) {
+		UTF8_TO_UTF16_FATAL(tmp, original_command);
+		SetEnvironmentVariableW(L"SSH_ORIGINAL_COMMAND", tmp);
+	}
+
+	if ((s->term) && (s->term[0]))
+		SetEnvironmentVariableA("TERM", s->term);
+
+	if (!s->is_subsystem) {
+		UTF8_TO_UTF16_FATAL(tmp, s->pw->pw_name);
+		_snwprintf(wbuf, sizeof(wbuf)/2, L"%ls@%ls $P$G", tmp, _wgetenv(L"COMPUTERNAME"));
+		SetEnvironmentVariableW(L"PROMPT", wbuf);
+	}
+
+	free(pw_dir_w);
+	free(tmp);
+}
+
+char* w32_programdir();
+int register_child(void* child, unsigned long pid);
+
+int do_exec_windows(struct ssh *ssh, Session *s, const char *command, int pty) {
+	int pipein[2], pipeout[2], pipeerr[2], r;
+	char *exec_command = NULL, *progdir = w32_programdir(), *cmd = NULL, *shell_host = NULL, *command_b64 = NULL;
+	wchar_t *exec_command_w = NULL, *pw_dir_w;
+	const char *sftp_exe = "sftp-server.exe", *argp = NULL;
+	size_t command_b64_len = 0;
+	PROCESS_INFORMATION pi;
+	STARTUPINFOW si;
+	BOOL create_process_ret_val;
+	HANDLE hToken = INVALID_HANDLE_VALUE;
+	extern int debug_flag;
+
+	if (s->is_subsystem >= SUBSYSTEM_INT_SFTP_ERROR) {
+		error("This service allows sftp connections only.\n");
+		fflush(NULL);
+		exit(1);
+	}
+	
+	/* Create three pipes for stdin, stdout and stderr */
+	if (pipe(pipein) == -1 || pipe(pipeout) == -1 || pipe(pipeerr) == -1) 
+		fatal("%s: cannot create pipe: %.100s", __func__, strerror(errno));
+
+	if ((pw_dir_w = utf8_to_utf16(s->pw->pw_dir)) == NULL)
+		fatal("%s: out of memory", __func__);
+
+	set_nonblock(pipein[0]);
+	set_nonblock(pipein[1]);
+	set_nonblock(pipeout[0]);
+	set_nonblock(pipeout[1]);
+	set_nonblock(pipeerr[0]);
+	set_nonblock(pipeerr[1]);
+
+	fcntl(pipein[1], F_SETFD, FD_CLOEXEC);
+	fcntl(pipeout[0], F_SETFD, FD_CLOEXEC);
+	fcntl(pipeerr[0], F_SETFD, FD_CLOEXEC);
+
+	/* setup Environment varibles */
+	setup_session_vars(s);
+
+	/* prepare exec - path used with CreateProcess() */
+	if (s->is_subsystem || (command && memcmp(command, "scp", 3) == 0)) {
+		/* relative or absolute */
+		if (command == NULL || command[0] == '\0')
+			fatal("expecting command for a subsystem");
+
+		if (command[1] == ':') /* absolute */
+			exec_command = xstrdup(command);
+		else {/*relative*/
+			const int command_len = strlen(progdir) + 1 + strlen(command) + (strlen(sftp_exe) - strlen(INTERNAL_SFTP_NAME));
+			exec_command = malloc(command_len);
+			if (exec_command == NULL)
+				fatal("%s, out of memory", __func__);
+						
+			cmd = exec_command;
+			memcpy(cmd, progdir, strlen(progdir));
+			cmd += strlen(progdir);
+			*cmd++ = '\\';
+
+			/* In windows, INTERNAL_SFTP is supported via sftp-server.exe.
+			 * This is a deviation from the UNIX implementation that hosts sftp-server within sshd.
+			 * If sftp-server were to be hosted within sshd for Windows, following would be needed
+			 *  - Impersonate client user
+			 *  - call sftp-server-main
+			 *
+			 * SSHD service account would need impersonate privilege to impersonate client user, 
+			 * thereby needing elevation of SSHD account privileges
+			 * Apart from slight performance gain (by hosting sftp in process), there isn't a clear 
+			 * gain with this option over using and spawning sftp-server.exe.
+			 * Hence going with the later option. 
+			 */
+			if(IS_INTERNAL_SFTP(command)) {
+				memcpy(cmd, sftp_exe, strlen(sftp_exe) + 1);
+				cmd += strlen(sftp_exe);
+				
+				// copy the arguments (if any).
+				if(strlen(command) > strlen(INTERNAL_SFTP_NAME)) {
+					argp = (char*)command + strlen(INTERNAL_SFTP_NAME);
+					memcpy(cmd, argp, strlen(argp)+1);
+				}
+			} else
+				memcpy(cmd, command, strlen(command) + 1);
+		}
+	} else {
+		/* 
+		 * contruct %programdir%\ssh-shellhost.exe <-nopty> base64encoded(command)  
+		 * command is base64 encoded to preserve original special charecters like '"'
+		 * else they will get lost in CreateProcess translation
+		 */
+		shell_host = pty ? "ssh-shellhost.exe " : "ssh-shellhost.exe -nopty ";
+		if (command) {
+			/* accomodate bas64 encoding bloat and null terminator */
+			command_b64_len = ((strlen(command) + 2) / 3) * 4 + 1;
+			if ((command_b64 = malloc(command_b64_len)) == NULL ||
+			    b64_ntop(command, strlen(command), command_b64, command_b64_len) == -1)
+				fatal("%s, error encoding session command");
+		}
+		exec_command = malloc(strlen(progdir) + 1 + strlen(shell_host) + (command_b64 ? strlen(command_b64): 0) + 1);
+		if (exec_command == NULL)
+			fatal("%s, out of memory", __func__);
+		cmd = exec_command;
+		memcpy(cmd, progdir, strlen(progdir));
+		cmd += strlen(progdir);
+		*cmd++ = '\\';
+		memcpy(cmd, shell_host, strlen(shell_host));
+		cmd += strlen(shell_host);
+		if (command_b64) {
+			memcpy(cmd, command_b64, strlen(command_b64));
+			cmd += strlen(command_b64);
+		}
+		*cmd = '\0';
+	}
+
+	/* start the process */
+	{
+		memset(&si, 0, sizeof(STARTUPINFO));
+		si.cb = sizeof(STARTUPINFO);
+		si.dwXSize = 5;
+		si.dwYSize = 5;
+		si.dwXCountChars = s->col;
+		si.dwYCountChars = s->row;
+		si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESIZE | STARTF_USECOUNTCHARS;
+		
+		si.hStdInput = (HANDLE)w32_fd_to_handle(pipein[0]);
+		si.hStdOutput = (HANDLE)w32_fd_to_handle(pipeout[1]);
+		si.hStdError = (HANDLE)w32_fd_to_handle(pipeerr[1]);
+		si.lpDesktop = NULL;
+
+		debug("Executing command: %s", exec_command);
+		UTF8_TO_UTF16_FATAL(exec_command_w, exec_command);
+		
+		/* in debug mode launch using sshd.exe user context */
+		create_process_ret_val = CreateProcessW(NULL, exec_command_w, NULL, NULL, TRUE,
+			DETACHED_PROCESS, NULL, pw_dir_w,
+			&si, &pi);
+
+		if (!create_process_ret_val)
+			fatal("ERROR. Cannot create process (%u).\n", GetLastError());
+
+		CloseHandle(pi.hThread);
+		s->pid = pi.dwProcessId;
+		register_child(pi.hProcess, pi.dwProcessId);
+	}
 
 	/*
-	 * We stay in this loop until the client requests to execute a shell
-	 * or a command.
-	 */
-	for (;;) {
-		success = 0;
+	* Set interactive/non-interactive mode.
+	*/
+	packet_set_interactive(s->display != NULL, options.ip_qos_interactive,
+		options.ip_qos_bulk);
 
-		/* Get a packet from the client. */
-		type = packet_read();
+	/* Close the child sides of the socket pairs. */
+	close(pipein[0]);
+	close(pipeout[1]);
+	close(pipeerr[1]);
 
-		/* Process the packet. */
-		switch (type) {
-		case SSH_CMSG_REQUEST_COMPRESSION:
-			compression_level = packet_get_int();
-			packet_check_eom();
-			if (compression_level < 1 || compression_level > 9) {
-				packet_send_debug("Received invalid compression level %d.",
-				    compression_level);
-				break;
-			}
-			if (options.compression == COMP_NONE) {
-				debug2("compression disabled");
-				break;
-			}
-			/* Enable compression after we have responded with SUCCESS. */
-			enable_compression_after_reply = 1;
-			success = 1;
-			break;
+	/*
+	* Enter the interactive session.  Note: server_loop must be able to
+	* handle the case that fdin and fdout are the same.
+	*/
+	if (s->ttyfd == -1)
+		session_set_fds(ssh, s, pipein[1], pipeout[0], pipeerr[0], s->is_subsystem, 0);
+	else
+		session_set_fds(ssh, s, pipein[1], pipeout[0], pipeerr[0], s->is_subsystem, 1); /* tty interactive session */
 
-		case SSH_CMSG_REQUEST_PTY:
-			success = session_pty_req(s);
-			break;
-
-		case SSH_CMSG_X11_REQUEST_FORWARDING:
-			s->auth_proto = packet_get_string(&proto_len);
-			s->auth_data = packet_get_string(&data_len);
-
-			screen_flag = packet_get_protocol_flags() &
-			    SSH_PROTOFLAG_SCREEN_NUMBER;
-			debug2("SSH_PROTOFLAG_SCREEN_NUMBER: %d", screen_flag);
-
-			if (packet_remaining() == 4) {
-				if (!screen_flag)
-					debug2("Buggy client: "
-					    "X11 screen flag missing");
-				s->screen = packet_get_int();
-			} else {
-				s->screen = 0;
-			}
-			packet_check_eom();
-			success = session_setup_x11fwd(s);
-			if (!success) {
-				free(s->auth_proto);
-				free(s->auth_data);
-				s->auth_proto = NULL;
-				s->auth_data = NULL;
-			}
-			break;
-
-		case SSH_CMSG_AGENT_REQUEST_FORWARDING:
-			if (!options.allow_agent_forwarding ||
-			    no_agent_forwarding_flag || compat13) {
-				debug("Authentication agent forwarding not permitted for this authentication.");
-				break;
-			}
-			debug("Received authentication agent forwarding request.");
-			success = auth_input_request_forwarding(s->pw);
-			break;
-
-		case SSH_CMSG_PORT_FORWARD_REQUEST:
-			if (no_port_forwarding_flag) {
-				debug("Port forwarding not permitted for this authentication.");
-				break;
-			}
-			if (!(options.allow_tcp_forwarding & FORWARD_REMOTE)) {
-				debug("Port forwarding not permitted.");
-				break;
-			}
-			debug("Received TCP/IP port forwarding request.");
-			if (channel_input_port_forward_request(s->pw->pw_uid == 0,
-			    &options.fwd_opts) < 0) {
-				debug("Port forwarding failed.");
-				break;
-			}
-			success = 1;
-			break;
-
-		case SSH_CMSG_MAX_PACKET_SIZE:
-			if (packet_set_maxsize(packet_get_int()) > 0)
-				success = 1;
-			break;
-
-		case SSH_CMSG_EXEC_SHELL:
-		case SSH_CMSG_EXEC_CMD:
-			if (type == SSH_CMSG_EXEC_CMD) {
-				command = packet_get_string(&dlen);
-				debug("Exec command '%.500s'", command);
-				if (do_exec(s, command) != 0)
-					packet_disconnect(
-					    "command execution failed");
-				free(command);
-			} else {
-				if (do_exec(s, NULL) != 0)
-					packet_disconnect(
-					    "shell execution failed");
-			}
-			packet_check_eom();
-			session_close(s);
-			return;
-
-		default:
-			/*
-			 * Any unknown messages in this phase are ignored,
-			 * and a failure message is returned.
-			 */
-			logit("Unknown packet type received after authentication: %d", type);
-		}
-		packet_start(success ? SSH_SMSG_SUCCESS : SSH_SMSG_FAILURE);
-		packet_send();
-		packet_write_wait();
-
-		/* Enable compression now that we have replied if appropriate. */
-		if (enable_compression_after_reply) {
-			enable_compression_after_reply = 0;
-			packet_start_compression(compression_level);
-		}
-	}
+		free(pw_dir_w);
+		free(exec_command_w);
+	return 0;
 }
 
-// PRAGMA:TODO
-#ifndef WIN32_FIXME
-#define USE_PIPES 1
-#endif
-
-#ifdef WIN32_FIXME
-HANDLE hConIn = NULL;
-HANDLE hConOut = NULL;
-HANDLE hConErr = NULL;
-
-BOOL MakeNewConsole(void)
-{
-	BOOL bRet = TRUE;
-
-	if (!(bRet = FreeConsole())) return bRet;
-	if (!(bRet = AllocConsole())) return bRet;
-	HANDLE hTemp;
-
-	hTemp = CreateFile("CONIN$",GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ,0,OPEN_EXISTING,0,0);
-	if (INVALID_HANDLE_VALUE != hTemp)
-	{
-		DuplicateHandle(GetCurrentProcess(),hTemp,GetCurrentProcess(),&hConIn, 0,TRUE,DUPLICATE_SAME_ACCESS);
-		CloseHandle(hTemp);
-	} else
-		return FALSE;
-
-	hTemp = CreateFile("CONOUT$",GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,0,OPEN_EXISTING,0,0);
-	if (INVALID_HANDLE_VALUE != hTemp)
-	{
-		DuplicateHandle(GetCurrentProcess(),hTemp,GetCurrentProcess(),&hConOut, 0,TRUE,DUPLICATE_SAME_ACCESS);
-		DuplicateHandle(GetCurrentProcess(),hTemp,GetCurrentProcess(),&hConErr, 0,TRUE,DUPLICATE_SAME_ACCESS);
-		CloseHandle(hTemp);
-
-	} else
-		return FALSE;
-
-	SetStdHandle(STD_INPUT_HANDLE,hConIn);
-	SetStdHandle(STD_OUTPUT_HANDLE,hConOut);
-	SetStdHandle(STD_ERROR_HANDLE,hConErr);
-
-	return TRUE;
-
+int
+do_exec_no_pty(struct ssh *ssh, Session *s, const char *command) {
+	return do_exec_windows(ssh, s, command, 0);
 }
-#endif
+
+int
+do_exec_pty(struct ssh *ssh, Session *s, const char *command) {
+	return do_exec_windows(ssh, s, command, 1);
+}
+
+#else    /* !WINDOWS */
 /*
  * This is called to fork and execute a command when we have no tty.  This
  * will call do_child from the child, and server_loop from the parent after
  * setting up file descriptors and such.
  */
 int
-do_exec_no_pty(Session *s, const char *command)
+do_exec_no_pty(struct ssh *ssh, Session *s, const char *command)
 {
-#ifdef WIN32_FIXME
-  
-  /*
-   * Win32 code.
-   */
-
-  if (s -> is_subsystem == SUBSYSTEM_INT_SFTP_ERROR)
-  {
-    printf("This service allows sftp connections only.\n");
-    fflush(NULL);
-    exit(1);
-  }
-  else if (s -> is_subsystem == SUBSYSTEM_INT_SFTP)
-  {
-    u_int i;
-    for (i = 0; i < options.num_subsystems; i++)
-    {
-      if (strcmp("sftp", options.subsystem_name[i]) == 0)
-      {
-        command = options.subsystem_args[i];
-      }
-    }
-  }
-
-  PROCESS_INFORMATION pi;
-  STARTUPINFOW si;
-  
-  int sockin[2];
-  int sockout[2];
-  int sockerr[2];
-  
-  BOOL b;
-  
-  HANDLE hToken = INVALID_HANDLE_VALUE;
-  
-  int do_xauth;
-  
-  FILE *f = NULL;
-  
-  char cmd[1024];
-  char *exec_command;
-  char *laddr;
-  char buf[256];
-  int prot_scr_width = 80;
-  int prot_scr_height = 25;
-  #ifdef WIN32_PRAGMA_REMCON
-  char exec_command_str[512];
-  #endif
-
-  if (!command)
-  {
-	#ifndef WIN32_PRAGMA_REMCON
-    exec_command = s->pw->pw_shell;
-	#else
-	if ( PathFileExists("\\program files\\pragma\\shared files\\cmdserver.exe") )
-	 snprintf(exec_command_str, sizeof(exec_command_str),
-		"\\program files\\pragma\\shared files\\cmdserver.exe SSHD %d %d", s->row, s->col );
-	else {
-		// find base path of our executable
-		char basepath[MAX_PATH];
-		strcpy_s(basepath, MAX_PATH, __progname);
-		PathRemoveFileSpec(basepath); // get the full dir part of the name
-		snprintf(exec_command_str, sizeof(exec_command_str),
-			"%s\\cmdserver.exe SSHD %d %d", basepath,s->row, s->col);
-	}
-	exec_command = exec_command_str;
-	#endif
-  }  
-  else
-  {
-    exec_command = command;
-  }  
-
-  do_xauth = s -> display != NULL && s -> auth_proto != NULL && s -> auth_data != NULL;
-
-  /*
-   * Create three socket pairs for stdin, stdout and stderr 
-   */
-
-  #ifdef WIN32_PRAGMA_REMCON
-
-  int retcode = -1;
-  if ( (!s -> is_subsystem) && (s ->ttyfd != -1))
-  {
-	prot_scr_width = s->col;
-	prot_scr_height = s->row;
-	extern HANDLE hConsole ;
-	hConsole = GetStdHandle (STD_OUTPUT_HANDLE);
-	ConSetScreenSize( s->col, s->row );
-	socketpair(sockin);
-	s->ptyfd = sockin[1]; // hConsole; // the pty is the Windows console output handle in our Win32 port
-  }
-  else
-	socketpair(sockin);
-  #else
-  HANDLE wfdtocmd = -1;
-  int retcode = -1;
-  if ((!s->is_subsystem) && (s->ttyfd != -1))
-  {
-	  //FreeConsole();
-	  //AllocConsole();
-	  MakeNewConsole();
-	  prot_scr_width = s->col;
-	  prot_scr_height = s->row;
-	  extern HANDLE hConsole;
-	  hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
-	  ConSetScreenSize(s->col, s->row);
-	  s->ptyfd = hConsole; // the pty is the Windows console output handle in our Win32 port
-
-	  wfdtocmd = GetStdHandle(STD_INPUT_HANDLE); // we use this console handle to feed input to Windows shell cmd.exe
-	  sockin[1] = allocate_sfd((int)wfdtocmd); // put the std input handle in our global general handle table
-  }
-  else
-	  socketpair(sockin);
-  #endif
-
-  socketpair(sockout);
-  socketpair(sockerr);
-
-  debug3("sockin[0]: %d sockin[1]: %d", sockin[0], sockin[1]);
-  debug3("sockout[0]: %d sockout[1]: %d", sockout[0], sockout[1]);
-  debug3("sockerr[0]: %d sockerr[1]: %d", sockerr[0], sockerr[1]);
-
-  #ifndef WIN32_PRAGMA_REMCON
-  if ( (s -> is_subsystem) || (s ->ttyfd == -1))
-	crlf_sfd(sockin[1]);
-
-  crlf_sfd(sockout[1]);
-
-  if ( (s -> is_subsystem) || (s ->ttyfd == -1))
-  #endif
-	  SetHandleInformation(sfd_to_handle(sockin[1]), HANDLE_FLAG_INHERIT, 0);
-
-  SetHandleInformation(sfd_to_handle(sockout[1]), HANDLE_FLAG_INHERIT, 0);
-  SetHandleInformation(sfd_to_handle(sockerr[1]), HANDLE_FLAG_INHERIT, 0);
-
-  /*
-   * Assign sockets to StartupInfo 
-   */
-  
-  memset(&si, 0 , sizeof(STARTUPINFO));
-  
-  si.cb = sizeof(STARTUPINFO);
-  si.lpReserved       = 0;
-  si.lpTitle          = NULL; /* NULL means use exe name as title */
-  si.dwX              = 0;
-  si.dwY              = 0;
-  si.dwXSize          = prot_scr_width;
-  si.dwYSize          = prot_scr_height;
-  si.dwXCountChars    = prot_scr_width;
-  si.dwYCountChars    = prot_scr_height;
-  si.dwFillAttribute  = 0;
-  si.dwFlags          = STARTF_USESTDHANDLES | STARTF_USESIZE | STARTF_USECOUNTCHARS; // | STARTF_USESHOWWINDOW ;
-  si.wShowWindow      = 0; // FALSE ;
-  si.cbReserved2      = 0;
-  si.lpReserved2      = 0;
-
-  #ifdef WIN32_PRAGMA_REMCON
-  if (0) {
-  #else
-  if ( (!s -> is_subsystem) && (s ->ttyfd != -1) ) {
-  
-	  si.hStdInput = GetStdHandle (STD_INPUT_HANDLE) ; // shell tty interactive session gets a console input for Win32
-	  si.hStdOutput = (HANDLE) sfd_to_handle(sockout[0]);
-	  si.hStdError = (HANDLE) sfd_to_handle(sockerr[0]);
-	  si.lpDesktop = NULL ; //winstadtname_w ;
-  #endif
-  }
-  else {
-	  si.hStdInput = (HANDLE) sfd_to_handle(sockin[0]);
-	  si.hStdOutput = (HANDLE) sfd_to_handle(sockout[0]);
-	  si.hStdError = (HANDLE) sfd_to_handle(sockerr[0]);
-	  si.lpDesktop = NULL; //L"winsta0\\default";
-  }
-  //si.wShowWindow = SW_HIDE;
-  //si.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
-
-
-  SetEnvironmentVariable("USER", s->pw->pw_name);
-  SetEnvironmentVariable("USERNAME", s->pw->pw_name);
-  SetEnvironmentVariable("LOGNAME", s->pw->pw_name);
-
-  /*
-   * Setup xauth if needed 
-   */
-   
-  if (do_xauth && options.xauth_location != NULL) 
-  {
-    /*
-     * Add authority data to .Xauthority if appropriate. 
-     */
-  
-    if (debug_flag) 
-    {
-      fprintf(stderr, "Running %.500s remove %.100s\n",
-                  options.xauth_location, s->auth_display);
-      
-      fprintf(stderr, "%.500s add %.100s %.100s %.100s\n", options.xauth_location, 
-                  s -> auth_display, s -> auth_proto, s -> auth_data);
-    }
-    
-    snprintf(cmd, sizeof cmd, "%s -q -", options.xauth_location);
-    
-    f = _popen(cmd, "w");
-    
-    if (f) 
-    {
-      fprintf(f, "remove %s\n", s -> auth_display);
-
-      fprintf(f, "add %s %s %s\n", s -> auth_display, s -> auth_proto, s -> auth_data);
-      
-      _pclose(f);
-    } 
-    else 
-    {
-      fprintf(stderr, "Could not run %s\n", cmd);
-    }
-  }
-
-  #if 0
-  
-  set_nonblock(sockin[0]);
-  set_nonblock(sockin[1]);
-  set_nonblock(sockout[0]);
-  set_nonblock(sockout[1]);
-  set_nonblock(sockerr[0]);
-  set_nonblock(sockerr[1]);
-  
-  #endif
-
-  /* 
-   * If we get this far, the user has already been authenticated 
-   * We should either have a user token in authctxt -> methoddata 
-   * (e.g. for password auth) or we need to create a more restrictive
-   * token using CreateUserToken for non-password auth mechanisms.
-   */
-  
-  /*
-   * Try LSA token first.
-   */
-    
-  if (s -> authctxt -> hTokenLsa_)
-  {
-    debug("Using token from lsa...");
-      
-    hToken = s -> authctxt -> hTokenLsa_;
-      
-    ModifyRightsToDesktop(hToken, 1);
-  }
-    
-  #ifdef USE_NTCREATETOKEN
-    
-  /*
-   * Next try to get an NtCreateToken token if enabled.
-   */
-    
-  else
-  {
-    debug("Using token from NtCreateToken()...");
-      
-    hToken = (HANDLE) PwdCreateUserToken(s -> authctxt -> user, NULL, "sshd");
-  }
-    
-  #endif
-    
-  /*
-   * Next try pass-auth token.
-   */
-  
-  else
-  {
-    debug("Using token from LogonUser()...");
-    
-    hToken = s -> authctxt -> methoddata;
-
-    /*
-     * Clear this value out because we're going to release
-     * the token in this function
-     */
-    
-    s -> authctxt -> methoddata = INVALID_HANDLE_VALUE;
-
-    ModifyRightsToDesktop(hToken, 1);
-  }
-
-  /*
-   * Set display if needed
-   */
-  
-  if (s -> display)
-  {
-    SetEnvironmentVariable("DISPLAY", s -> display);
-  }
-
-  /*
-   * Get user homedir if needed.
-   */
-  
-  if (1) // (s -> pw -> pw_dir == NULL || s -> pw -> pw_dir[0] == '\0')
-  {
-    /*
-     * If there is homedir from LSA use it.
-     */
-
-    //if (HomeDirLsaW[0] != '\0')
-    //{
-      //s -> pw -> pw_dir = HomeDirLsaW;
-    //}
-    
-    /*
-     * If not get homedir from token.
-     */
-    
-    //else
-    //{
-      s -> pw -> pw_dir = GetHomeDirFromToken(s -> pw -> pw_name, hToken);
-    //}
-  }
-
-  /*
-   * Change to users home directory
-   */
-
-  _wchdir(s -> pw -> pw_dir);
-
-  SetEnvironmentVariableW(L"HOME", s -> pw -> pw_dir);
-  wchar_t *wstr, wchr;
-  wstr = wcschr(s->pw->pw_dir, ':');
-  if (wstr) {
-	  wchr = *(wstr + 1);
-	  *(wstr + 1) = '\0';
-	  SetEnvironmentVariableW(L"HOMEDRIVE", s->pw->pw_dir);
-	  *(wstr + 1) = wchr;
-	  SetEnvironmentVariableW(L"HOMEPATH", (wstr+1));
-  }
-
-  SetEnvironmentVariableW(L"USERPROFILE", s -> pw -> pw_dir);
-  
-  // find the server name of the domain controller which created this token
-  GetDomainFromToken ( &hToken, buf, sizeof(buf));
-  if (buf[0])
-	  SetEnvironmentVariable("USERDOMAIN", buf );
-
-  /*
-   * Set SSH_CLIENT variable.
-   */
-  
-  snprintf(buf, sizeof buf, "%.50s %d %d",
-               get_remote_ipaddr(), get_remote_port(), get_local_port());
-  
-  SetEnvironmentVariable("SSH_CLIENT", buf);
-
-  /*
-   * Set SSH_CONNECTION variable.
-   */
-  
-  laddr = get_local_ipaddr(packet_get_connection_in());
-
-  snprintf(buf, sizeof buf, "%.50s %d %.50s %d",
-               get_remote_ipaddr(), get_remote_port(), laddr, get_local_port());
-               
-  free(laddr);
-  
-  SetEnvironmentVariable("SSH_CONNECTION", buf);
-
-  // set better prompt for Windows cmd shell
-  if (!s -> is_subsystem) {
-	  snprintf(buf,sizeof buf, "%s@%s $P$G", s->pw->pw_name, getenv("COMPUTERNAME"));
-	  SetEnvironmentVariable("PROMPT", buf);
-  }
-
-  /*
-   * Get the current user's name (associated with sshd thread).
-   */
-
-  debug3("Home path before CreateProcessAsUser [%ls]", s -> pw -> pw_dir);
-  
-  DWORD size = 256;
-  
-  char name[256];
-  
-  GetUserName(name, &size);
-
-#ifndef WIN32_PRAGMA_REMCON
-  if ( (!s -> is_subsystem) && (s ->ttyfd != -1)) {
-	  // Send to the remote client ANSI/VT Sequence so that they send us CRLF in place of LF
-	  char *inittermseq = "\033[20h\033[?7h\0" ; // LFtoCRLF AUTOWRAPON
-	  Channel *c=channel_by_id ( s->chanid );
-	  buffer_append(&c->input, inittermseq, strlen(inittermseq));
-	  channel_output_poll();
-  }
-#endif
-
-  //if (s ->ttyfd != -1) {
-  	  // set the channel to tty interactive type
-  //	  Channel *c=channel_by_id ( s->chanid );
-  //	  c->isatty = 1;
-  //}
-
-  if ( (s->term) && (s->term[0]) )
-		  SetEnvironmentVariable("TERM", s->term);
-  /*
-   * Create new process as other user using access token object.
-   */
-  
-  debug("Executing command: %s", exec_command);
-
-  /*
-   * Create the child process 
-   */
-   
-  wchar_t exec_command_w[MAX_PATH];
-  
-  MultiByteToWideChar(CP_UTF8, 0, exec_command, -1, exec_command_w, MAX_PATH);
-  DWORD	dwStartupFlags = CREATE_SUSPENDED ;  // 0
- 
-  SetConsoleCtrlHandler(NULL, FALSE);
-  b = CreateProcessAsUserW(hToken, NULL, exec_command_w, NULL, NULL, TRUE,
-                              /*CREATE_NEW_PROCESS_GROUP*/ dwStartupFlags, NULL, s -> pw -> pw_dir,
-                                  &si, &pi);
-  /*
-   * If CreateProcessAsUser() fails we will try CreateProcess()
-   * but only if current user and login user are the same.
-   */
-
-  if ((!b) && (strcmp(name, s -> pw -> pw_name) == 0))
-  {
-    b = CreateProcessW(NULL, exec_command_w, NULL, NULL, TRUE, 
-                          /*CREATE_NEW_PROCESS_GROUP*/ 	dwStartupFlags, NULL, s -> pw -> pw_dir,
-                              &si, &pi);
-  }
-
-  if (!b)
-  {
-    debug("ERROR. Cannot create process as new user (%u).\n", GetLastError());
-    
-    CloseHandle(hToken);
-    
-    exit(1);
-  }
-  
-  /* 
-   * Save token used for create child process. We'll need it on cleanup
-   * to clean up DACL of Winsta0.
-   */
-  
-  //CloseHandle(hToken);
-  
-  s -> authctxt -> currentToken_ = hToken; 
-
-  /*
-   * Log the process handle (fake it as the pid) for termination lookups 
-   */
-   
-  s -> pid = pi.hProcess;
-  s -> processId = pi.dwProcessId;
-  
-  // Add the child process created to select mux so that during our select data call we know if the process has exited
-  int WSHELPAddChildToWatch ( HANDLE processtowatch);
-  WSHELPAddChildToWatch ( pi.hProcess);
-
-  /* 
-   * Set interactive/non-interactive mode. 
-   */
-  
-  packet_set_interactive(s -> display != NULL, options.ip_qos_interactive, 
-                             options.ip_qos_bulk);
-
-  /* 
-   * We are the parent.  Close the child sides of the socket pairs. 
-   */
-  #ifndef WIN32_PRAGMA_REMCON
-  if ( (s -> is_subsystem) || (s ->ttyfd == -1))
-	close(sockin[0]);
-  #else
-	close(sockin[0]);
-  #endif
-
-  close(sockout[0]);
-  close(sockerr[0]);
-
-  ResumeThread ( pi.hThread ); /* now let cmd shell main thread be active s we have closed all i/o file handle that cmd will use */
-  SetConsoleCtrlHandler(NULL, TRUE);
-
-  /*
-   * Close child thread handles as we do not need it. Process handle we keep so that we can know if it has died o not
-   */
-
-  CloseHandle(pi.hThread);
-
-  // CloseHandle(pi.hProcess);
-
-  /*
-   * Clear loginmsg, since it's the child's responsibility to display
-   * it to the user, otherwise multiple sessions may accumulate
-   * multiple copies of the login messages.
-   */
-  
-  buffer_clear(&loginmsg);
-
-  /*
-   * Enter the interactive session.  Note: server_loop must be able to
-   * handle the case that fdin and fdout are the same.
-   */
-   
-  if (compat20) 
-  {
-	if ( s->ttyfd == -1)
-		session_set_fds(s, sockin[1], sockout[1], sockerr[1], s -> is_subsystem, 0);
-	else
-		session_set_fds(s, sockin[1], sockout[1], sockerr[1], s -> is_subsystem, 1); // tty interctive session
-  } 
-  else 
-  {
-    server_loop(pi.hProcess, sockin[1], sockout[1], sockerr[1]);
-    
-    /* 
-     * server_loop has closed inout[0] and err[0]. 
-     */
-  }
-  
-  return 0;
-
-  #else
-  
-  /*
-   * Original OpenSSH code.
-   */
 	pid_t pid;
 
 #ifdef USE_PIPES
@@ -1147,10 +664,6 @@ do_exec_no_pty(Session *s, const char *command)
 	case 0:
 		is_child = 1;
 
-		/* Child.  Reinitialize the log since the pid has changed. */
-		log_init(__progname, options.log_level,
-		    options.log_facility, log_stderr);
-
 		/*
 		 * Create a new session and process group since the 4.4BSD
 		 * setlogin() affects the entire process group.
@@ -1203,7 +716,7 @@ do_exec_no_pty(Session *s, const char *command)
 #endif
 
 		/* Do processing for the child (exec command etc). */
-		do_child(s, command);
+		do_child(ssh, s, command);
 		/* NOTREACHED */
 	default:
 		break;
@@ -1234,14 +747,8 @@ do_exec_no_pty(Session *s, const char *command)
 	close(pout[1]);
 	close(perr[1]);
 
-	if (compat20) {
-		session_set_fds(s, pin[1], pout[0], perr[0],
-		    s->is_subsystem, 0);
-	} else {
-		/* Enter the interactive session. */
-		server_loop(pid, pin[1], pout[0], perr[0]);
-		/* server_loop has closed pin[1], pout[0], and perr[0]. */
-	}
+	session_set_fds(ssh, s, pin[1], pout[0], perr[0],
+	    s->is_subsystem, 0);
 #else
 	/* We are the parent.  Close the child sides of the socket pairs. */
 	close(inout[0]);
@@ -1251,16 +758,10 @@ do_exec_no_pty(Session *s, const char *command)
 	 * Enter the interactive session.  Note: server_loop must be able to
 	 * handle the case that fdin and fdout are the same.
 	 */
-	if (compat20) {
-		session_set_fds(s, inout[1], inout[1], err[1],
-		    s->is_subsystem, 0);
-	} else {
-		server_loop(pid, inout[1], inout[1], err[1]);
-		/* server_loop has closed inout[1] and err[1]. */
-	}
+	session_set_fds(s, inout[1], inout[1], err[1],
+	    s->is_subsystem, 0);
 #endif
 	return 0;
-#endif /* else WIN32_FIXME */
 }
 
 /*
@@ -1270,13 +771,8 @@ do_exec_no_pty(Session *s, const char *command)
  * lastlog, and other such operations.
  */
 int
-do_exec_pty(Session *s, const char *command)
+do_exec_pty(struct ssh *ssh, Session *s, const char *command)
 {
-#ifndef WIN32_FIXME
-
-  /*
-   * Original OpenSSH code.
-   */
 	int fdout, ptyfd, ttyfd, ptymaster;
 	pid_t pid;
 
@@ -1322,9 +818,6 @@ do_exec_pty(Session *s, const char *command)
 		close(fdout);
 		close(ptymaster);
 
-		/* Child.  Reinitialize the log because the pid has changed. */
-		log_init(__progname, options.log_level,
-		    options.log_facility, log_stderr);
 		/* Close the master side of the pseudo tty. */
 		close(ptyfd);
 
@@ -1343,23 +836,17 @@ do_exec_pty(Session *s, const char *command)
 		close(ttyfd);
 
 		/* record login, etc. similar to login(1) */
-#ifndef HAVE_OSF_SIA
-		if (!(options.use_login && command == NULL)) {
 #ifdef _UNICOS
-			cray_init_job(s->pw); /* set up cray jid and tmpdir */
+		cray_init_job(s->pw); /* set up cray jid and tmpdir */
 #endif /* _UNICOS */
-			do_login(s, command);
-		}
-# ifdef LOGIN_NEEDS_UTMPX
-		else
-			do_pre_login(s);
-# endif
+#ifndef HAVE_OSF_SIA
+		do_login(ssh, s, command);
 #endif
 		/*
 		 * Do common processing for the child, such as execing
 		 * the command.
 		 */
-		do_child(s, command);
+		do_child(ssh, s, command);
 		/* NOTREACHED */
 	default:
 		break;
@@ -1381,29 +868,16 @@ do_exec_pty(Session *s, const char *command)
 	s->ptymaster = ptymaster;
 	packet_set_interactive(1, 
 	    options.ip_qos_interactive, options.ip_qos_bulk);
-	if (compat20) {
-		session_set_fds(s, ptyfd, fdout, -1, 1, 1);
-	} else {
-		server_loop(pid, ptyfd, fdout, -1);
-		/* server_loop _has_ closed ptyfd and fdout. */
-	}
+	session_set_fds(ssh, s, ptyfd, fdout, -1, 1, 1);
 	return 0;
-#else
-
-  /*
-   * Win32 code.
-   */
-   
-  //return 0;
-  return do_exec_no_pty(s, command);
-
-#endif 
 }
+#endif   /* !WINDOWS */
 
 #ifdef LOGIN_NEEDS_UTMPX
 static void
 do_pre_login(Session *s)
 {
+	struct ssh *ssh = active_state;	/* XXX */
 	socklen_t fromlen;
 	struct sockaddr_storage from;
 	pid_t pid = getpid();
@@ -1423,7 +897,7 @@ do_pre_login(Session *s)
 	}
 
 	record_utmp_only(pid, s->tty, s->pw->pw_name,
-	    get_remote_name_or_ip(utmp_len, options.use_dns),
+	    session_get_remote_name_or_ip(ssh, utmp_len, options.use_dns),
 	    (struct sockaddr *)&from, fromlen);
 }
 #endif
@@ -1433,11 +907,11 @@ do_pre_login(Session *s)
  * to be forced, execute that instead.
  */
 int
-do_exec(Session *s, const char *command)
+do_exec(struct ssh *ssh, Session *s, const char *command)
 {
 	int ret;
-	const char *forced = NULL;
-	char session_type[1024], *tty = NULL;
+	const char *forced = NULL, *tty = NULL;
+	char session_type[1024];
 
 	if (options.adm_forced_command) {
 		original_command = command;
@@ -1472,13 +946,14 @@ do_exec(Session *s, const char *command)
 			tty += 5;
 	}
 
-	verbose("Starting session: %s%s%s for %s from %.200s port %d",
+	verbose("Starting session: %s%s%s for %s from %.200s port %d id %d",
 	    session_type,
 	    tty == NULL ? "" : " on ",
 	    tty == NULL ? "" : tty,
 	    s->pw->pw_name,
-	    get_remote_ipaddr(),
-	    get_remote_port());
+	    ssh_remote_ipaddr(ssh),
+	    ssh_remote_port(ssh),
+	    s->self);
 
 #ifdef SSH_AUDIT_EVENTS
 	if (command != NULL)
@@ -1492,9 +967,9 @@ do_exec(Session *s, const char *command)
 	}
 #endif
 	if (s->ttyfd != -1)
-		ret = do_exec_pty(s, command);
+		ret = do_exec_pty(ssh, s, command);
 	else
-		ret = do_exec_no_pty(s, command);
+		ret = do_exec_no_pty(ssh, s, command);
 
 	original_command = NULL;
 
@@ -1510,7 +985,7 @@ do_exec(Session *s, const char *command)
 
 /* administrative, login(1)-like work */
 void
-do_login(Session *s, const char *command)
+do_login(struct ssh *ssh, Session *s, const char *command)
 {
 	socklen_t fromlen;
 	struct sockaddr_storage from;
@@ -1534,7 +1009,7 @@ do_login(Session *s, const char *command)
 	/* Record that there was a login on that tty from the remote host. */
 	if (!use_privsep)
 		record_login(pid, s->tty, pw->pw_name, pw->pw_uid,
-		    get_remote_name_or_ip(utmp_len,
+		    session_get_remote_name_or_ip(ssh, utmp_len,
 		    options.use_dns),
 		    (struct sockaddr *)&from, fromlen);
 
@@ -1606,65 +1081,6 @@ check_quietlogin(Session *s, const char *command)
 		return 1;
 #endif
 	return 0;
-}
-
-/*
- * Sets the value of the given variable in the environment.  If the variable
- * already exists, its value is overridden.
- */
-void
-child_set_env(char ***envp, u_int *envsizep, const char *name,
-	const char *value)
-{
-	char **env;
-	u_int envsize;
-	u_int i, namelen;
-
-	if (strchr(name, '=') != NULL) {
-		error("Invalid environment variable \"%.100s\"", name);
-		return;
-	}
-
-	/*
-	 * If we're passed an uninitialized list, allocate a single null
-	 * entry before continuing.
-	 */
-	if (*envp == NULL && *envsizep == 0) {
-		*envp = xmalloc(sizeof(char *));
-		*envp[0] = NULL;
-		*envsizep = 1;
-	}
-
-	/*
-	 * Find the slot where the value should be stored.  If the variable
-	 * already exists, we reuse the slot; otherwise we append a new slot
-	 * at the end of the array, expanding if necessary.
-	 */
-	env = *envp;
-	namelen = strlen(name);
-	for (i = 0; env[i]; i++)
-		if (strncmp(env[i], name, namelen) == 0 && env[i][namelen] == '=')
-			break;
-	if (env[i]) {
-		/* Reuse the slot. */
-		free(env[i]);
-	} else {
-		/* New variable.  Expand if necessary. */
-		envsize = *envsizep;
-		if (i >= envsize - 1) {
-			if (envsize >= 1000)
-				fatal("child_set_env: too many env vars");
-			envsize += 50;
-			env = (*envp) = xreallocarray(env, envsize, sizeof(char *));
-			*envsizep = envsize;
-		}
-		/* Need to set the NULL pointer at end of array beyond the new slot. */
-		env[i + 1] = NULL;
-	}
-
-	/* Allocate space and format the variable in the appropriate slot. */
-	env[i] = xmalloc(strlen(name) + 1 + strlen(value) + 1);
-	snprintf(env[i], strlen(name) + 1 + strlen(value) + 1, "%s=%s", name, value);
 }
 
 /*
@@ -1768,8 +1184,9 @@ read_etc_default_login(char ***env, u_int *envsize, uid_t uid)
 }
 #endif /* HAVE_ETC_DEFAULT_LOGIN */
 
-void
-copy_environment(char **source, char ***env, u_int *envsize)
+static void
+copy_environment_blacklist(char **source, char ***env, u_int *envsize,
+    const char *blacklist)
 {
 	char *var_name, *var_val;
 	int i;
@@ -1785,15 +1202,24 @@ copy_environment(char **source, char ***env, u_int *envsize)
 		}
 		*var_val++ = '\0';
 
-		debug3("Copy environment: %s=%s", var_name, var_val);
-		child_set_env(env, envsize, var_name, var_val);
+		if (blacklist == NULL ||
+		    match_pattern_list(var_name, blacklist, 0) != 1) {
+			debug3("Copy environment: %s=%s", var_name, var_val);
+			child_set_env(env, envsize, var_name, var_val);
+		}
 
 		free(var_name);
 	}
 }
 
+void
+copy_environment(char **source, char ***env, u_int *envsize)
+{
+	copy_environment_blacklist(source, env, envsize, NULL);
+}
+
 static char **
-do_setup_env(Session *s, const char *shell)
+do_setup_env(struct ssh *ssh, Session *s, const char *shell)
 {
 	char buf[256];
 	u_int i, envsize;
@@ -1829,82 +1255,82 @@ do_setup_env(Session *s, const char *shell)
 	ssh_gssapi_do_child(&env, &envsize);
 #endif
 
-	if (!options.use_login) {
-		/* Set basic environment. */
-		for (i = 0; i < s->num_env; i++)
-			child_set_env(&env, &envsize, s->env[i].name,
-			    s->env[i].val);
+	/* Set basic environment. */
+	for (i = 0; i < s->num_env; i++)
+		child_set_env(&env, &envsize, s->env[i].name, s->env[i].val);
 
-		child_set_env(&env, &envsize, "USER", pw->pw_name);
-		child_set_env(&env, &envsize, "LOGNAME", pw->pw_name);
+	child_set_env(&env, &envsize, "USER", pw->pw_name);
+	child_set_env(&env, &envsize, "LOGNAME", pw->pw_name);
 #ifdef _AIX
-		child_set_env(&env, &envsize, "LOGIN", pw->pw_name);
+	child_set_env(&env, &envsize, "LOGIN", pw->pw_name);
 #endif
-		child_set_env(&env, &envsize, "HOME", pw->pw_dir);
+	child_set_env(&env, &envsize, "HOME", pw->pw_dir);
 #ifdef HAVE_LOGIN_CAP
-		if (setusercontext(lc, pw, pw->pw_uid, LOGIN_SETPATH) < 0)
-			child_set_env(&env, &envsize, "PATH", _PATH_STDPATH);
-		else
-			child_set_env(&env, &envsize, "PATH", getenv("PATH"));
+	if (setusercontext(lc, pw, pw->pw_uid, LOGIN_SETPATH) < 0)
+		child_set_env(&env, &envsize, "PATH", _PATH_STDPATH);
+	else
+		child_set_env(&env, &envsize, "PATH", getenv("PATH"));
 #else /* HAVE_LOGIN_CAP */
 # ifndef HAVE_CYGWIN
-		/*
-		 * There's no standard path on Windows. The path contains
-		 * important components pointing to the system directories,
-		 * needed for loading shared libraries. So the path better
-		 * remains intact here.
-		 */
+	/*
+	 * There's no standard path on Windows. The path contains
+	 * important components pointing to the system directories,
+	 * needed for loading shared libraries. So the path better
+	 * remains intact here.
+	 */
 #  ifdef HAVE_ETC_DEFAULT_LOGIN
-		read_etc_default_login(&env, &envsize, pw->pw_uid);
-		path = child_get_env(env, "PATH");
+	read_etc_default_login(&env, &envsize, pw->pw_uid);
+	path = child_get_env(env, "PATH");
 #  endif /* HAVE_ETC_DEFAULT_LOGIN */
-		if (path == NULL || *path == '\0') {
-			child_set_env(&env, &envsize, "PATH",
-			    s->pw->pw_uid == 0 ?
-				SUPERUSER_PATH : _PATH_STDPATH);
-		}
+	if (path == NULL || *path == '\0') {
+		child_set_env(&env, &envsize, "PATH",
+		    s->pw->pw_uid == 0 ?  SUPERUSER_PATH : _PATH_STDPATH);
+	}
 # endif /* HAVE_CYGWIN */
 #endif /* HAVE_LOGIN_CAP */
 
-		snprintf(buf, sizeof buf, "%.200s/%.50s",
-			 _PATH_MAILDIR, pw->pw_name);
-		child_set_env(&env, &envsize, "MAIL", buf);
+	snprintf(buf, sizeof buf, "%.200s/%.50s", _PATH_MAILDIR, pw->pw_name);
+	child_set_env(&env, &envsize, "MAIL", buf);
 
-		/* Normal systems set SHELL by default. */
-		child_set_env(&env, &envsize, "SHELL", shell);
-	}
+	/* Normal systems set SHELL by default. */
+	child_set_env(&env, &envsize, "SHELL", shell);
+
 	if (getenv("TZ"))
 		child_set_env(&env, &envsize, "TZ", getenv("TZ"));
 
 	/* Set custom environment options from RSA authentication. */
-	if (!options.use_login) {
-		while (custom_environment) {
-			struct envstring *ce = custom_environment;
-			char *str = ce->s;
+	while (custom_environment) {
+		struct envstring *ce = custom_environment;
+		char *str = ce->s;
 
-			for (i = 0; str[i] != '=' && str[i]; i++)
-				;
-			if (str[i] == '=') {
-				str[i] = 0;
-				child_set_env(&env, &envsize, str, str + i + 1);
-			}
-			custom_environment = ce->next;
-			free(ce->s);
-			free(ce);
+		for (i = 0; str[i] != '=' && str[i]; i++)
+			;
+		if (str[i] == '=') {
+			str[i] = 0;
+			child_set_env(&env, &envsize, str, str + i + 1);
 		}
+		custom_environment = ce->next;
+		free(ce->s);
+		free(ce);
 	}
 
 	/* SSH_CLIENT deprecated */
 	snprintf(buf, sizeof buf, "%.50s %d %d",
-	    get_remote_ipaddr(), get_remote_port(), get_local_port());
+	    ssh_remote_ipaddr(ssh), ssh_remote_port(ssh),
+	    ssh_local_port(ssh));
 	child_set_env(&env, &envsize, "SSH_CLIENT", buf);
 
 	laddr = get_local_ipaddr(packet_get_connection_in());
 	snprintf(buf, sizeof buf, "%.50s %d %.50s %d",
-	    get_remote_ipaddr(), get_remote_port(), laddr, get_local_port());
+	    ssh_remote_ipaddr(ssh), ssh_remote_port(ssh),
+	    laddr, ssh_local_port(ssh));
 	free(laddr);
 	child_set_env(&env, &envsize, "SSH_CONNECTION", buf);
 
+	if (tun_fwd_ifnames != NULL)
+		child_set_env(&env, &envsize, "SSH_TUNNEL", tun_fwd_ifnames);
+	if (auth_info_file != NULL)
+		child_set_env(&env, &envsize, "SSH_USER_AUTH", auth_info_file);
 	if (s->ttyfd != -1)
 		child_set_env(&env, &envsize, "SSH_TTY", s->tty);
 	if (s->term)
@@ -1954,12 +1380,16 @@ do_setup_env(Session *s, const char *shell)
 	if (options.use_pam) {
 		char **p;
 
+		/*
+		 * Don't allow SSH_AUTH_INFO variables posted to PAM to leak
+		 * back into the environment.
+		 */
 		p = fetch_pam_child_environment();
-		copy_environment(p, &env, &envsize);
+		copy_environment_blacklist(p, &env, &envsize, "SSH_AUTH_INFO*");
 		free_pam_environment(p);
 
 		p = fetch_pam_environment();
-		copy_environment(p, &env, &envsize);
+		copy_environment_blacklist(p, &env, &envsize, "SSH_AUTH_INFO*");
 		free_pam_environment(p);
 	}
 #endif /* USE_PAM */
@@ -1969,7 +1399,7 @@ do_setup_env(Session *s, const char *shell)
 		    auth_sock_name);
 
 	/* read $HOME/.ssh/environment. */
-	if (options.permit_user_env && !options.use_login) {
+	if (options.permit_user_env) {
 		snprintf(buf, sizeof buf, "%.200s/.ssh/environment",
 		    strcmp(pw->pw_dir, "/") ? pw->pw_dir : "");
 		read_environment_file(&env, &envsize, buf);
@@ -1990,7 +1420,6 @@ do_setup_env(Session *s, const char *shell)
 static void
 do_rc_files(Session *s, const char *shell)
 {
-#ifndef WIN32_FIXME
 	FILE *f = NULL;
 	char cmd[1024];
 	int do_xauth;
@@ -2055,7 +1484,6 @@ do_rc_files(Session *s, const char *shell)
 			    cmd);
 		}
 	}
-#endif
 }
 
 static void
@@ -2149,11 +1577,7 @@ safely_chroot(const char *path, uid_t uid)
 void
 do_setusercontext(struct passwd *pw)
 {
-#ifndef WIN32_FIXME
 	char *chroot_path, *tmp;
-#ifdef USE_LIBIAF
-	int doing_chroot = 0;
-#endif
 
 	platform_setusercontext(pw);
 
@@ -2181,7 +1605,7 @@ do_setusercontext(struct passwd *pw)
 
 		platform_setusercontext_post_groups(pw);
 
-		if (options.chroot_directory != NULL &&
+		if (!in_chroot && options.chroot_directory != NULL &&
 		    strcasecmp(options.chroot_directory, "none") != 0) {
                         tmp = tilde_expand_filename(options.chroot_directory,
 			    pw->pw_uid);
@@ -2193,9 +1617,7 @@ do_setusercontext(struct passwd *pw)
 			/* Make sure we don't attempt to chroot again */
 			free(options.chroot_directory);
 			options.chroot_directory = NULL;
-#ifdef USE_LIBIAF
-			doing_chroot = 1;
-#endif
+			in_chroot = 1;
 		}
 
 #ifdef HAVE_LOGIN_CAP
@@ -2210,16 +1632,16 @@ do_setusercontext(struct passwd *pw)
 		(void) setusercontext(lc, pw, pw->pw_uid, LOGIN_SETUMASK);
 #else
 # ifdef USE_LIBIAF
-/* In a chroot environment, the set_id() will always fail; typically 
- * because of the lack of necessary authentication services and runtime
- * such as ./usr/lib/libiaf.so, ./usr/lib/libpam.so.1, and ./etc/passwd
- * We skip it in the internal sftp chroot case.
- * We'll lose auditing and ACLs but permanently_set_uid will
- * take care of the rest.
- */
-	if ((doing_chroot == 0) && set_id(pw->pw_name) != 0) {
-		fatal("set_id(%s) Failed", pw->pw_name);
-	}
+		/*
+		 * In a chroot environment, the set_id() will always fail;
+		 * typically because of the lack of necessary authentication
+		 * services and runtime such as ./usr/lib/libiaf.so,
+		 * ./usr/lib/libpam.so.1, and ./etc/passwd We skip it in the
+		 * internal sftp chroot case.  We'll lose auditing and ACLs but
+		 * permanently_set_uid will take care of the rest.
+		 */
+		if (!in_chroot && set_id(pw->pw_name) != 0)
+			fatal("set_id(%s) Failed", pw->pw_name);
 # endif /* USE_LIBIAF */
 		/* Permanently switch to the desired uid. */
 		permanently_set_uid(pw);
@@ -2231,13 +1653,11 @@ do_setusercontext(struct passwd *pw)
 
 	if (getuid() != pw->pw_uid || geteuid() != pw->pw_uid)
 		fatal("Failed to set uids to %u.", (u_int) pw->pw_uid);
-#endif /* !WIN32_FIXME */
 }
 
 static void
 do_pwchange(Session *s)
 {
-#ifndef WIN32_FIXME
 	fflush(NULL);
 	fprintf(stderr, "WARNING: Your password has expired.\n");
 	if (s->ttyfd != -1) {
@@ -2258,36 +1678,11 @@ do_pwchange(Session *s)
 		    "Password change required but no TTY available.\n");
 	}
 	exit(1);
-#endif /* !WIN32_FIXME */
 }
 
 static void
-launch_login(struct passwd *pw, const char *hostname)
+child_close_fds(struct ssh *ssh)
 {
-#ifndef WIN32_FIXME
-	/* Launch login(1). */
-
-	execl(LOGIN_PROGRAM, "login", "-h", hostname,
-#ifdef xxxLOGIN_NEEDS_TERM
-		    (s->term ? s->term : "unknown"),
-#endif /* LOGIN_NEEDS_TERM */
-#ifdef LOGIN_NO_ENDOPT
-	    "-p", "-f", pw->pw_name, (char *)NULL);
-#else
-	    "-p", "-f", "--", pw->pw_name, (char *)NULL);
-#endif
-
-	/* Login couldn't be executed, die. */
-
-	perror("login");
-	exit(1);
-#endif /* !WIN32_FIXME */
-}
-
-static void
-child_close_fds(void)
-{
-#ifndef WIN32_FIXME
 	extern int auth_sock;
 
 	if (auth_sock != -1) {
@@ -2306,7 +1701,7 @@ child_close_fds(void)
 	 * open in the parent.
 	 */
 	/* XXX better use close-on-exec? -markus */
-	channel_close_all();
+	channel_close_all(ssh);
 
 	/*
 	 * Close any extra file descriptors.  Note that there may still be
@@ -2321,7 +1716,6 @@ child_close_fds(void)
 	 * descriptors open.
 	 */
 	closefrom(STDERR_FILENO + 1);
-#endif /* !WIN32_FIXME */
 }
 
 /*
@@ -2331,30 +1725,30 @@ child_close_fds(void)
  */
 #define ARGV_MAX 10
 void
-do_child(Session *s, const char *command)
+do_child(struct ssh *ssh, Session *s, const char *command)
 {
-#ifndef WIN32_FIXME
+#ifdef WINDOWS
+	/*not called for Windows */
+	return;
+#else  /* !WINDOWS */
 	extern char **environ;
 	char **env;
 	char *argv[ARGV_MAX];
-	const char *shell, *shell0, *hostname = NULL;
+	const char *shell, *shell0;
 	struct passwd *pw = s->pw;
 	int r = 0;
 
 	/* remove hostkey from the child's memory */
 	destroy_sensitive_data();
+	packet_clear_keys();
 
 	/* Force a password change */
 	if (s->authctxt->force_pwchange) {
 		do_setusercontext(pw);
-		child_close_fds();
+		child_close_fds(ssh);
 		do_pwchange(s);
 		exit(1);
 	}
-
-	/* login(1) is only called if we execute the login shell */
-	if (options.use_login && command != NULL)
-		options.use_login = 0;
 
 #ifdef _UNICOS
 	cray_setup(pw->pw_uid, pw->pw_name, command);
@@ -2364,28 +1758,26 @@ do_child(Session *s, const char *command)
 	 * Login(1) does this as well, and it needs uid 0 for the "-h"
 	 * switch, so we let login(1) to this for us.
 	 */
-	if (!options.use_login) {
 #ifdef HAVE_OSF_SIA
-		session_setup_sia(pw, s->ttyfd == -1 ? NULL : s->tty);
-		if (!check_quietlogin(s, command))
-			do_motd();
+	session_setup_sia(pw, s->ttyfd == -1 ? NULL : s->tty);
+	if (!check_quietlogin(s, command))
+		do_motd();
 #else /* HAVE_OSF_SIA */
-		/* When PAM is enabled we rely on it to do the nologin check */
-		if (!options.use_pam)
-			do_nologin(pw);
-		do_setusercontext(pw);
-		/*
-		 * PAM session modules in do_setusercontext may have
-		 * generated messages, so if this in an interactive
-		 * login then display them too.
-		 */
-		if (!check_quietlogin(s, command))
-			display_loginmsg();
+	/* When PAM is enabled we rely on it to do the nologin check */
+	if (!options.use_pam)
+		do_nologin(pw);
+	do_setusercontext(pw);
+	/*
+	 * PAM session modules in do_setusercontext may have
+	 * generated messages, so if this in an interactive
+	 * login then display them too.
+	 */
+	if (!check_quietlogin(s, command))
+		display_loginmsg();
 #endif /* HAVE_OSF_SIA */
-	}
 
 #ifdef USE_PAM
-	if (options.use_pam && !options.use_login && !is_pam_session_open()) {
+	if (options.use_pam && !is_pam_session_open()) {
 		debug3("PAM session not opened, exiting");
 		display_loginmsg();
 		exit(254);
@@ -2402,24 +1794,20 @@ do_child(Session *s, const char *command)
 	 * Make sure $SHELL points to the shell from the password file,
 	 * even if shell is overridden from login.conf
 	 */
-	env = do_setup_env(s, shell);
+	env = do_setup_env(ssh, s, shell);
 
 #ifdef HAVE_LOGIN_CAP
 	shell = login_getcapstr(lc, "shell", (char *)shell, (char *)shell);
 #endif
 
-	/* we have to stash the hostname before we close our socket. */
-	if (options.use_login)
-		hostname = get_remote_name_or_ip(utmp_len,
-		    options.use_dns);
 	/*
 	 * Close the connection descriptors; note that this is the child, and
 	 * the server will still have the socket open, and it is important
 	 * that we do not shutdown it.  Note that the descriptors cannot be
 	 * closed before building the environment, as we call
-	 * get_remote_ipaddr there.
+	 * ssh_remote_ipaddr there.
 	 */
-	child_close_fds();
+	child_close_fds(ssh);
 
 	/*
 	 * Must take new environment into use so that .ssh/rc,
@@ -2459,19 +1847,18 @@ do_child(Session *s, const char *command)
 #ifdef HAVE_LOGIN_CAP
 		r = login_getcapbool(lc, "requirehome", 0);
 #endif
-		if (r || options.chroot_directory == NULL ||
-		    strcasecmp(options.chroot_directory, "none") == 0)
+		if (r || !in_chroot) {
 			fprintf(stderr, "Could not chdir to home "
 			    "directory %s: %s\n", pw->pw_dir,
 			    strerror(errno));
+		}
 		if (r)
 			exit(1);
 	}
 
 	closefrom(STDERR_FILENO + 1);
 
-	if (!options.use_login)
-		do_rc_files(s, shell);
+	do_rc_files(s, shell);
 
 	/* restore SIGPIPE for child */
 	signal(SIGPIPE, SIG_DFL);
@@ -2500,11 +1887,6 @@ do_child(Session *s, const char *command)
 	}
 
 	fflush(NULL);
-
-	if (options.use_login) {
-		launch_login(pw, hostname);
-		/* NEVERREACHED */
-	}
 
 	/* Get the last component of the shell name. */
 	if ((shell0 = strrchr(shell, '/')) != NULL)
@@ -2550,7 +1932,7 @@ do_child(Session *s, const char *command)
 	execve(shell, argv, env);
 	perror(shell);
 	exit(1);
-#endif /* !WIN32_FIXME */
+#endif   /* !WINDOWS */
 }
 
 void
@@ -2584,8 +1966,8 @@ session_new(void)
 			return NULL;
 		debug2("%s: allocate (allocated %d max %d)",
 		    __func__, sessions_nalloc, options.max_sessions);
-		tmp = xreallocarray(sessions, sessions_nalloc + 1,
-		    sizeof(*sessions));
+		tmp = xrecallocarray(sessions, sessions_nalloc,
+		    sessions_nalloc + 1, sizeof(*sessions));
 		if (tmp == NULL) {
 			error("%s: cannot allocate %d sessions",
 			    __func__, sessions_nalloc + 1);
@@ -2723,7 +2105,7 @@ session_by_pid(pid_t pid)
 }
 
 static int
-session_window_change_req(Session *s)
+session_window_change_req(struct ssh *ssh, Session *s)
 {
 	s->col = packet_get_int();
 	s->row = packet_get_int();
@@ -2735,7 +2117,7 @@ session_window_change_req(Session *s)
 }
 
 static int
-session_pty_req(Session *s)
+session_pty_req(struct ssh *ssh, Session *s)
 {
 	u_int len;
 	int n_bytes;
@@ -2750,14 +2132,8 @@ session_pty_req(Session *s)
 	}
 
 	s->term = packet_get_string(&len);
-
-	if (compat20) {
-		s->col = packet_get_int();
-		s->row = packet_get_int();
-	} else {
-		s->row = packet_get_int();
-		s->col = packet_get_int();
-	}
+	s->col = packet_get_int();
+	s->row = packet_get_int();
 	s->xpixel = packet_get_int();
 	s->ypixel = packet_get_int();
 
@@ -2768,7 +2144,11 @@ session_pty_req(Session *s)
 
 	/* Allocate a pty and open it. */
 	debug("Allocating pty.");
+#ifdef WINDOWS	
+	if (!(pty_allocate(&s->ptyfd, &s->ttyfd, s->tty,
+#else
 	if (!PRIVSEP(pty_allocate(&s->ptyfd, &s->ttyfd, s->tty,
+#endif
 	    sizeof(s->tty)))) {
 		free(s->term);
 		s->term = NULL;
@@ -2779,30 +2159,22 @@ session_pty_req(Session *s)
 	}
 	debug("session_pty_req: session %d alloc %s", s->self, s->tty);
 
-	/* for SSH1 the tty modes length is not given */
-	if (!compat20)
-		n_bytes = packet_remaining();
-	#ifndef WIN32_PRAGMA_REMCON
+	n_bytes = packet_remaining();
 	tty_parse_modes(s->ttyfd, &n_bytes);
-	#endif
 
 	if (!use_privsep)
 		pty_setowner(s->pw, s->tty);
 
 	/* Set window size from the packet. */
-	#ifndef WIN32_FIXME
 	pty_change_window_size(s->ptyfd, s->row, s->col, s->xpixel, s->ypixel);
-	#endif
 
-	#ifndef WIN32_PRAGMA_REMCON
 	packet_check_eom();
-	#endif
 	session_proctitle(s);
 	return 1;
 }
 
 static int
-session_subsystem_req(Session *s)
+session_subsystem_req(struct ssh *ssh, Session *s)
 {
 	struct stat st;
 	u_int len;
@@ -2829,7 +2201,7 @@ session_subsystem_req(Session *s)
 				s->is_subsystem = SUBSYSTEM_EXT;
 				debug("subsystem: exec() %s", cmd);
 			}
-			success = do_exec(s, cmd) == 0;
+			success = do_exec(ssh, s, cmd) == 0;
 			break;
 		}
 	}
@@ -2842,7 +2214,7 @@ session_subsystem_req(Session *s)
 }
 
 static int
-session_x11_req(Session *s)
+session_x11_req(struct ssh *ssh, Session *s)
 {
 	int success;
 
@@ -2857,7 +2229,13 @@ session_x11_req(Session *s)
 	s->screen = packet_get_int();
 	packet_check_eom();
 
-	success = session_setup_x11fwd(s);
+	if (xauth_valid_string(s->auth_proto) &&
+	    xauth_valid_string(s->auth_data))
+		success = session_setup_x11fwd(ssh, s);
+	else {
+		success = 0;
+		error("Invalid X11 forwarding data");
+	}
 	if (!success) {
 		free(s->auth_proto);
 		free(s->auth_data);
@@ -2868,26 +2246,26 @@ session_x11_req(Session *s)
 }
 
 static int
-session_shell_req(Session *s)
+session_shell_req(struct ssh *ssh, Session *s)
 {
 	packet_check_eom();
-	return do_exec(s, NULL) == 0;
+	return do_exec(ssh, s, NULL) == 0;
 }
 
 static int
-session_exec_req(Session *s)
+session_exec_req(struct ssh *ssh, Session *s)
 {
 	u_int len, success;
 
 	char *command = packet_get_string(&len);
 	packet_check_eom();
-	success = do_exec(s, command) == 0;
+	success = do_exec(ssh, s, command) == 0;
 	free(command);
 	return success;
 }
 
 static int
-session_break_req(Session *s)
+session_break_req(struct ssh *ssh, Session *s)
 {
 
 	packet_get_int();	/* ignored */
@@ -2899,7 +2277,7 @@ session_break_req(Session *s)
 }
 
 static int
-session_env_req(Session *s)
+session_env_req(struct ssh *ssh, Session *s)
 {
 	char *name, *val;
 	u_int name_len, val_len, i;
@@ -2917,8 +2295,8 @@ session_env_req(Session *s)
 	for (i = 0; i < options.num_accept_env; i++) {
 		if (match_pattern(name, options.accept_env[i])) {
 			debug2("Setting env %d: %s=%s", s->num_env, name, val);
-			s->env = xreallocarray(s->env, s->num_env + 1,
-			    sizeof(*s->env));
+			s->env = xrecallocarray(s->env, s->num_env,
+			    s->num_env + 1, sizeof(*s->env));
 			s->env[s->num_env].name = name;
 			s->env[s->num_env].val = val;
 			s->num_env++;
@@ -2934,7 +2312,7 @@ session_env_req(Session *s)
 }
 
 static int
-session_auth_agent_req(Session *s)
+session_auth_agent_req(struct ssh *ssh, Session *s)
 {
 	static int called = 0;
 	packet_check_eom();
@@ -2946,22 +2324,21 @@ session_auth_agent_req(Session *s)
 		return 0;
 	} else {
 		called = 1;
-		return auth_input_request_forwarding(s->pw);
+		return auth_input_request_forwarding(ssh, s->pw);
 	}
 }
 
 int
-session_input_channel_req(Channel *c, const char *rtype)
+session_input_channel_req(struct ssh *ssh, Channel *c, const char *rtype)
 {
 	int success = 0;
 	Session *s;
 
 	if ((s = session_by_channel(c->self)) == NULL) {
-		logit("session_input_channel_req: no session %d req %.100s",
-		    c->self, rtype);
+		logit("%s: no session %d req %.100s", __func__, c->self, rtype);
 		return 0;
 	}
-	debug("session_input_channel_req: session %d req %s", s->self, rtype);
+	debug("%s: session %d req %s", __func__, s->self, rtype);
 
 	/*
 	 * a session is in LARVAL state until a shell, a command
@@ -2969,43 +2346,41 @@ session_input_channel_req(Channel *c, const char *rtype)
 	 */
 	if (c->type == SSH_CHANNEL_LARVAL) {
 		if (strcmp(rtype, "shell") == 0) {
-			success = session_shell_req(s);
+			success = session_shell_req(ssh, s);
 		} else if (strcmp(rtype, "exec") == 0) {
-			success = session_exec_req(s);
+			success = session_exec_req(ssh, s);
 		} else if (strcmp(rtype, "pty-req") == 0) {
-			success = session_pty_req(s);
+			success = session_pty_req(ssh, s);
 		} else if (strcmp(rtype, "x11-req") == 0) {
-			success = session_x11_req(s);
+			success = session_x11_req(ssh, s);
 		} else if (strcmp(rtype, "auth-agent-req@openssh.com") == 0) {
-			success = session_auth_agent_req(s);
+			success = session_auth_agent_req(ssh, s);
 		} else if (strcmp(rtype, "subsystem") == 0) {
-			success = session_subsystem_req(s);
+			success = session_subsystem_req(ssh, s);
 		} else if (strcmp(rtype, "env") == 0) {
-			success = session_env_req(s);
+			success = session_env_req(ssh, s);
 		}
 	}
 	if (strcmp(rtype, "window-change") == 0) {
-		success = session_window_change_req(s);
+		success = session_window_change_req(ssh, s);
 	} else if (strcmp(rtype, "break") == 0) {
-		success = session_break_req(s);
+		success = session_break_req(ssh, s);
 	}
 
 	return success;
 }
 
 void
-session_set_fds(Session *s, int fdin, int fdout, int fderr, int ignore_fderr,
-    int is_tty)
+session_set_fds(struct ssh *ssh, Session *s,
+    int fdin, int fdout, int fderr, int ignore_fderr, int is_tty)
 {
-	if (!compat20)
-		fatal("session_set_fds: called for proto != 2.0");
 	/*
 	 * now that have a child and a pipe to the child,
 	 * we can activate our channel and register the fd's
 	 */
 	if (s->chanid == -1)
 		fatal("no channel for session %d", s->self);
-	channel_set_fds(s->chanid,
+	channel_set_fds(ssh, s->chanid,
 	    fdout, fdin, fderr,
 	    ignore_fderr ? CHAN_EXTENDED_IGNORE : CHAN_EXTENDED_READ,
 	    1, is_tty, CHAN_SES_WINDOW_DEFAULT);
@@ -3022,54 +2397,8 @@ session_pty_cleanup2(Session *s)
 		error("session_pty_cleanup: no session");
 		return;
 	}
-#ifndef WIN32_FIXME
-  
 	if (s->ttyfd == -1)
 		return;
-
-  #endif
-
-  #ifdef WIN32_FIXME
-   /*
-   * Send exit signal to child 'cmd.exe' process.
-   */
-  
-  if (s -> pid != NULL)
-  {
-
-    debug("Sending exit signal to child process [pid = %u]...", s -> pid);
-
-    if (!GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, s -> processId))
-    {
-      debug("ERROR. Cannot send signal to process.");
-    }
-  
-    /*
-     * Try wait 100 ms until child finished.
-     */
-
-    if (WaitForSingleObject(s -> pid, 100) == WAIT_TIMEOUT)
-    {
-      /*
-       * If still not closed, kill 'cmd.exe' process.
-       */
-    
-      if (TerminateProcess(s -> pid, 1) == TRUE)
-      {
-        debug("Process %u terminated.", s -> pid);
-      }
-      else
-      {
-        debug("ERROR. Cannot terminate %u process.", s -> pid);
-      }
-    }
-    
-    CloseHandle(s -> pid);
-    
-    ModifyRightsToDesktop(s -> authctxt -> currentToken_, 0);
-  }
- 
-  #endif
 
 	debug("session_pty_cleanup: session %d release %s", s->self, s->tty);
 
@@ -3103,7 +2432,6 @@ session_pty_cleanup(Session *s)
 static char *
 sig2name(int sig)
 {
-#ifndef WIN32_FIXME
 #define SSH_SIG(x) if (sig == SIG ## x) return #x
 	SSH_SIG(ABRT);
 	SSH_SIG(ALRM);
@@ -3119,84 +2447,44 @@ sig2name(int sig)
 	SSH_SIG(USR1);
 	SSH_SIG(USR2);
 #undef	SSH_SIG
-#endif
 	return "SIG@openssh.com";
 }
 
 static void
-session_close_x11(int id)
+session_close_x11(struct ssh *ssh, int id)
 {
 	Channel *c;
 
-	if ((c = channel_by_id(id)) == NULL) {
-		debug("session_close_x11: x11 channel %d missing", id);
+	if ((c = channel_by_id(ssh, id)) == NULL) {
+		debug("%s: x11 channel %d missing", __func__, id);
 	} else {
 		/* Detach X11 listener */
-		debug("session_close_x11: detach x11 channel %d", id);
-		channel_cancel_cleanup(id);
+		debug("%s: detach x11 channel %d", __func__, id);
+		channel_cancel_cleanup(ssh, id);
 		if (c->ostate != CHAN_OUTPUT_CLOSED)
-			chan_mark_dead(c);
+			chan_mark_dead(ssh, c);
 	}
 }
 
 static void
-session_close_single_x11(int id, void *arg)
+session_close_single_x11(struct ssh *ssh, int id, void *arg)
 {
 	Session *s;
 	u_int i;
-  #ifdef WIN32_FIXME
-  
-  /*
-   * Send exit signal to child 'cmd.exe' process.
-   */
-  
-    if (s -> pid != NULL)
-    {
-      debug("Sending exit signal to child process [pid = %u]...", s -> pid);
 
-      if (!GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, s -> processId))
-      {
-        debug("ERROR. Cannot send signal to process.");
-      }  
-  
-      /*
-       * Try wait 100 ms until child finished.
-       */
-
-      if (WaitForSingleObject(s -> pid, 100) == WAIT_TIMEOUT)
-      {
-        /* 
-         * If still not closed, kill 'cmd.exe' process.
-         */
-    
-        if (TerminateProcess(s -> pid, 1) == TRUE)
-        {
-          debug("Process %u terminated.", s -> pid);
-        }
-        else
-        {
-          debug("ERROR. Cannot terminate %u process.", s -> pid);
-        } 
-      }
-    
-      CloseHandle(s -> pid);
-    }
-  
-  #endif
-
-	debug3("session_close_single_x11: channel %d", id);
-	channel_cancel_cleanup(id);
+	debug3("%s: channel %d", __func__, id);
+	channel_cancel_cleanup(ssh, id);
 	if ((s = session_by_x11_channel(id)) == NULL)
-		fatal("session_close_single_x11: no x11 channel %d", id);
+		fatal("%s: no x11 channel %d", __func__, id);
 	for (i = 0; s->x11_chanids[i] != -1; i++) {
-		debug("session_close_single_x11: session %d: "
-		    "closing channel %d", s->self, s->x11_chanids[i]);
+		debug("%s: session %d: closing channel %d",
+		    __func__, s->self, s->x11_chanids[i]);
 		/*
 		 * The channel "id" is already closing, but make sure we
 		 * close all of its siblings.
 		 */
 		if (s->x11_chanids[i] != id)
-			session_close_x11(s->x11_chanids[i]);
+			session_close_x11(ssh, s->x11_chanids[i]);
 	}
 	free(s->x11_chanids);
 	s->x11_chanids = NULL;
@@ -3211,22 +2499,22 @@ session_close_single_x11(int id, void *arg)
 }
 
 static void
-session_exit_message(Session *s, int status)
+session_exit_message(struct ssh *ssh, Session *s, int status)
 {
 	Channel *c;
 
-	if ((c = channel_lookup(s->chanid)) == NULL)
-		fatal("session_exit_message: session %d: no channel %d",
-		    s->self, s->chanid);
-	debug("session_exit_message: session %d channel %d pid %ld",
-	    s->self, s->chanid, (long)s->pid);
+	if ((c = channel_lookup(ssh, s->chanid)) == NULL)
+		fatal("%s: session %d: no channel %d",
+		    __func__, s->self, s->chanid);
+	debug("%s: session %d channel %d pid %ld",
+	    __func__, s->self, s->chanid, (long)s->pid);
 
 	if (WIFEXITED(status)) {
-		channel_request_start(s->chanid, "exit-status", 0);
+		channel_request_start(ssh, s->chanid, "exit-status", 0);
 		packet_put_int(WEXITSTATUS(status));
 		packet_send();
 	} else if (WIFSIGNALED(status)) {
-		channel_request_start(s->chanid, "exit-signal", 0);
+		channel_request_start(ssh, s->chanid, "exit-signal", 0);
 		packet_put_cstring(sig2name(WTERMSIG(status)));
 #ifdef WCOREDUMP
 		packet_put_char(WCOREDUMP(status)? 1 : 0);
@@ -3242,14 +2530,14 @@ session_exit_message(Session *s, int status)
 	}
 
 	/* disconnect channel */
-	debug("session_exit_message: release channel %d", s->chanid);
+	debug("%s: release channel %d", __func__, s->chanid);
 
 	/*
 	 * Adjust cleanup callback attachment to send close messages when
 	 * the channel gets EOF. The session will be then be closed
 	 * by session_close_by_channel when the childs close their fds.
 	 */
-	channel_register_cleanup(c->self, session_close_by_channel, 1);
+	channel_register_cleanup(ssh, c->self, session_close_by_channel, 1);
 
 	/*
 	 * emulate a write failure with 'chan_write_failed', nobody will be
@@ -3258,15 +2546,20 @@ session_exit_message(Session *s, int status)
 	 * be some more data waiting in the pipe.
 	 */
 	if (c->ostate != CHAN_OUTPUT_CLOSED)
-		chan_write_failed(c);
+		chan_write_failed(ssh, c);
 }
 
 void
-session_close(Session *s)
+session_close(struct ssh *ssh, Session *s)
 {
 	u_int i;
 
-	debug("session_close: session %d pid %ld", s->self, (long)s->pid);
+	verbose("Close session: user %s from %.200s port %d id %d",
+	    s->pw->pw_name,
+	    ssh_remote_ipaddr(ssh),
+	    ssh_remote_port(ssh),
+	    s->self);
+
 	if (s->ttyfd != -1)
 		session_pty_cleanup(s);
 	free(s->term);
@@ -3288,16 +2581,15 @@ session_close(Session *s)
 }
 
 void
-session_close_by_pid(pid_t pid, int status)
+session_close_by_pid(struct ssh *ssh, pid_t pid, int status)
 {
 	Session *s = session_by_pid(pid);
 	if (s == NULL) {
-		debug("session_close_by_pid: no session for pid %ld",
-		    (long)pid);
+		debug("%s: no session for pid %ld", __func__, (long)pid);
 		return;
 	}
 	if (s->chanid != -1)
-		session_exit_message(s, status);
+		session_exit_message(ssh, s, status);
 	if (s->ttyfd != -1)
 		session_pty_cleanup(s);
 	s->pid = 0;
@@ -3308,19 +2600,18 @@ session_close_by_pid(pid_t pid, int status)
  * the session 'child' itself dies
  */
 void
-session_close_by_channel(int id, void *arg)
+session_close_by_channel(struct ssh *ssh, int id, void *arg)
 {
 	Session *s = session_by_channel(id);
 	u_int i;
 
 	if (s == NULL) {
-		debug("session_close_by_channel: no session for id %d", id);
+		debug("%s: no session for id %d", __func__, id);
 		return;
 	}
-	debug("session_close_by_channel: channel %d child %ld",
-	    id, (long)s->pid);
+	debug("%s: channel %d child %ld", __func__, id, (long)s->pid);
 	if (s->pid != 0) {
-		debug("session_close_by_channel: channel %d: has child", id);
+		debug("%s: channel %d: has child", __func__, id);
 		/*
 		 * delay detach of session, but release pty, since
 		 * the fd's to the child are already closed
@@ -3330,22 +2621,22 @@ session_close_by_channel(int id, void *arg)
 		return;
 	}
 	/* detach by removing callback */
-	channel_cancel_cleanup(s->chanid);
+	channel_cancel_cleanup(ssh, s->chanid);
 
 	/* Close any X11 listeners associated with this session */
 	if (s->x11_chanids != NULL) {
 		for (i = 0; s->x11_chanids[i] != -1; i++) {
-			session_close_x11(s->x11_chanids[i]);
+			session_close_x11(ssh, s->x11_chanids[i]);
 			s->x11_chanids[i] = -1;
 		}
 	}
 
 	s->chanid = -1;
-	session_close(s);
+	session_close(ssh, s);
 }
 
 void
-session_destroy_all(void (*closefunc)(Session *))
+session_destroy_all(struct ssh *ssh, void (*closefunc)(Session *))
 {
 	int i;
 	for (i = 0; i < sessions_nalloc; i++) {
@@ -3354,7 +2645,7 @@ session_destroy_all(void (*closefunc)(Session *))
 			if (closefunc != NULL)
 				closefunc(s);
 			else
-				session_close(s);
+				session_close(ssh, s);
 		}
 	}
 }
@@ -3397,7 +2688,7 @@ session_proctitle(Session *s)
 }
 
 int
-session_setup_x11fwd(Session *s)
+session_setup_x11fwd(struct ssh *ssh, Session *s)
 {
 	struct stat st;
 	char display[512], auth_display[512];
@@ -3417,23 +2708,18 @@ session_setup_x11fwd(Session *s)
 		packet_send_debug("No xauth program; cannot forward with spoofing.");
 		return 0;
 	}
-	if (options.use_login) {
-		packet_send_debug("X11 forwarding disabled; "
-		    "not compatible with UseLogin=yes.");
-		return 0;
-	}
 	if (s->display != NULL) {
 		debug("X11 display already set.");
 		return 0;
 	}
-	if (x11_create_display_inet(options.x11_display_offset,
+	if (x11_create_display_inet(ssh, options.x11_display_offset,
 	    options.x11_use_localhost, s->single_connection,
 	    &s->display_number, &s->x11_chanids) == -1) {
 		debug("x11_create_display_inet failed.");
 		return 0;
 	}
 	for (i = 0; s->x11_chanids[i] != -1; i++) {
-		channel_register_cleanup(s->x11_chanids[i],
+		channel_register_cleanup(ssh, s->x11_chanids[i],
 		    session_close_single_x11, 0);
 	}
 
@@ -3451,11 +2737,7 @@ session_setup_x11fwd(Session *s)
 		snprintf(auth_display, sizeof auth_display, "unix:%u.%u",
 		    s->display_number, s->screen);
 		s->display = xstrdup(display);
-#ifdef WIN32_FIXME
-		s->display = xstrdup(display);
-#else
 		s->auth_display = xstrdup(auth_display);
-#endif
 	} else {
 #ifdef IPADDR_IN_DISPLAY
 		struct hostent *he;
@@ -3482,26 +2764,17 @@ session_setup_x11fwd(Session *s)
 }
 
 static void
-do_authenticated2(Authctxt *authctxt)
+do_authenticated2(struct ssh *ssh, Authctxt *authctxt)
 {
-	server_loop2(authctxt);
+	server_loop2(ssh, authctxt);
 }
 
 void
-do_cleanup(Authctxt *authctxt)
+do_cleanup(struct ssh *ssh, Authctxt *authctxt)
 {
 	static int called = 0;
 
 	debug("do_cleanup");
-  #ifdef WIN32_FIXME
-
-    if (authctxt)
-    {
-      ModifyRightsToDesktop(authctxt -> currentToken_, 0);
-    }  
-  
-  #endif
-
 
 	/* no cleanup if we're in the child for login shell */
 	if (is_child)
@@ -3532,17 +2805,41 @@ do_cleanup(Authctxt *authctxt)
 #endif
 
 #ifdef GSSAPI
-	if (compat20 && options.gss_cleanup_creds)
+	if (options.gss_cleanup_creds)
 		ssh_gssapi_cleanup_creds();
 #endif
 
 	/* remove agent socket */
 	auth_sock_cleanup_proc(authctxt->pw);
 
+	/* remove userauth info */
+	if (auth_info_file != NULL) {
+		temporarily_use_uid(authctxt->pw);
+		unlink(auth_info_file);
+		restore_uid();
+		free(auth_info_file);
+		auth_info_file = NULL;
+	}
+
 	/*
 	 * Cleanup ptys/utmp only if privsep is disabled,
 	 * or if running in monitor.
 	 */
 	if (!use_privsep || mm_is_monitor())
-		session_destroy_all(session_pty_cleanup2);
+		session_destroy_all(ssh, session_pty_cleanup2);
 }
+
+/* Return a name for the remote host that fits inside utmp_size */
+
+const char *
+session_get_remote_name_or_ip(struct ssh *ssh, u_int utmp_size, int use_dns)
+{
+	const char *remote = "";
+
+	if (utmp_size > 0)
+		remote = auth_get_canonical_hostname(ssh, use_dns);
+	if (utmp_size == 0 || strlen(remote) > utmp_size)
+		remote = ssh_remote_ipaddr(ssh);
+	return remote;
+}
+

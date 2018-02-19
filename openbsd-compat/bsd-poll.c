@@ -1,5 +1,3 @@
-/* $Id: bsd-poll.c,v 1.6 2014/02/05 23:44:13 dtucker Exp $ */
-
 /*
  * Copyright (c) 2004, 2005, 2007 Darren Tucker (dtucker at zip com au).
  *
@@ -20,8 +18,7 @@
 #if !defined(HAVE_POLL)
 
 #include <sys/types.h>
-/*#include <sys/time.h> */
-#include <time.h>
+#include <sys/time.h>
 #ifdef HAVE_SYS_SELECT_H
 # include <sys/select.h>
 #endif

@@ -1,4 +1,4 @@
-/* $OpenBSD: ssh-pkcs11.c,v 1.21 2015/07/18 08:02:17 djm Exp $ */
+/* $OpenBSD: ssh-pkcs11.c,v 1.25 2017/05/31 09:15:42 deraadt Exp $ */
 /*
  * Copyright (c) 2010 Markus Friedl.  All rights reserved.
  *
@@ -27,12 +27,7 @@
 #include <stdio.h>
 
 #include <string.h>
-
-#ifdef WIN32_FIXME
-#include <Winbase.h>
-#else
 #include <dlfcn.h>
-#endif /*WIN32_FIXME*/
 
 #include "openbsd-compat/sys-queue.h"
 
@@ -113,12 +108,7 @@ pkcs11_provider_finalize(struct pkcs11_provider *p)
 		error("C_Finalize failed: %lu", rv);
 	p->valid = 0;
 	p->function_list = NULL;
-	
-  #ifdef WIN32_FIXME
-    FreeLibrary(p -> handle);
-  #else
 	dlclose(p->handle);
-  #endif /*WIN32_FIXME*/
 }
 
 /*
@@ -332,8 +322,10 @@ pkcs11_rsa_wrap(struct pkcs11_provider *provider, CK_ULONG slotidx,
 	k11->slotidx = slotidx;
 	/* identify key object on smartcard */
 	k11->keyid_len = keyid_attrib->ulValueLen;
-	k11->keyid = xmalloc(k11->keyid_len);
-	memcpy(k11->keyid, keyid_attrib->pValue, k11->keyid_len);
+	if (k11->keyid_len > 0) {
+		k11->keyid = xmalloc(k11->keyid_len);
+		memcpy(k11->keyid, keyid_attrib->pValue, k11->keyid_len);
+	}
 	k11->orig_finish = def->finish;
 	memcpy(&k11->rsa_method, def, sizeof(k11->rsa_method));
 	k11->rsa_method.name = "pkcs11";
@@ -545,7 +537,8 @@ pkcs11_fetch_keys_filter(struct pkcs11_provider *p, CK_ULONG slotidx,
 		}
 		if (rsa && rsa->n && rsa->e &&
 		    pkcs11_rsa_wrap(p, slotidx, &attribs[0], rsa) == 0) {
-			key = sshkey_new(KEY_UNSPEC);
+			if ((key = sshkey_new(KEY_UNSPEC)) == NULL)
+				fatal("sshkey_new failed");
 			key->rsa = rsa;
 			key->type = KEY_RSA;
 			key->flags |= SSHKEY_FLAG_EXT;
@@ -553,8 +546,8 @@ pkcs11_fetch_keys_filter(struct pkcs11_provider *p, CK_ULONG slotidx,
 				sshkey_free(key);
 			} else {
 				/* expand key array and add key */
-				*keysp = xreallocarray(*keysp, *nkeys + 1,
-				    sizeof(struct sshkey *));
+				*keysp = xrecallocarray(*keysp, *nkeys,
+				    *nkeys + 1, sizeof(struct sshkey *));
 				(*keysp)[*nkeys] = key;
 				*nkeys = *nkeys + 1;
 				debug("have %d keys", *nkeys);
@@ -585,32 +578,11 @@ pkcs11_add_provider(char *provider_id, char *pin, struct sshkey ***keyp)
 
 	*keyp = NULL;
 	if (pkcs11_provider_lookup(provider_id) != NULL) {
-		error("provider already registered: %s", provider_id);
+		debug("%s: provider already registered: %s",
+		    __func__, provider_id);
 		goto fail;
 	}
 	/* open shared pkcs11-libarary */
-#ifdef WIN32_FIXME
-
-    handle = LoadLibrary(provider_id);
-
-    if (handle == NULL)
-    {
-      error("Cannot load OpenSC library. Error code is: %u.\n"
-                "Please ensure that path to these libraries is properly "
-                    "set in your PATH variable.\n", GetLastError());
-      goto fail;
-    }
-
-    getfunctionlist = (CK_RV(*)(CK_FUNCTION_LIST **))GetProcAddress(handle, "C_GetFunctionList");
-
-    if (getfunctionlist == NULL)
-    {
-      error("Cannot load OpenSC library. Error code is: %u.\n", GetLastError());
-
-      goto fail;
-    }
-
-#else
 	if ((handle = dlopen(provider_id, RTLD_NOW)) == NULL) {
 		error("dlopen %s failed: %s", provider_id, dlerror());
 		goto fail;
@@ -619,30 +591,32 @@ pkcs11_add_provider(char *provider_id, char *pin, struct sshkey ***keyp)
 		error("dlsym(C_GetFunctionList) failed: %s", dlerror());
 		goto fail;
 	}
-#endif /*WIN32_FIXME*/
-  
 	p = xcalloc(1, sizeof(*p));
 	p->name = xstrdup(provider_id);
 	p->handle = handle;
 	/* setup the pkcs11 callbacks */
 	if ((rv = (*getfunctionlist)(&f)) != CKR_OK) {
-		error("C_GetFunctionList failed: %lu", rv);
+		error("C_GetFunctionList for provider %s failed: %lu",
+		    provider_id, rv);
 		goto fail;
 	}
 	p->function_list = f;
 	if ((rv = f->C_Initialize(NULL)) != CKR_OK) {
-		error("C_Initialize failed: %lu", rv);
+		error("C_Initialize for provider %s failed: %lu",
+		    provider_id, rv);
 		goto fail;
 	}
 	need_finalize = 1;
 	if ((rv = f->C_GetInfo(&p->info)) != CKR_OK) {
-		error("C_GetInfo failed: %lu", rv);
+		error("C_GetInfo for provider %s failed: %lu",
+		    provider_id, rv);
 		goto fail;
 	}
 	rmspace(p->info.manufacturerID, sizeof(p->info.manufacturerID));
 	rmspace(p->info.libraryDescription, sizeof(p->info.libraryDescription));
-	debug("manufacturerID <%s> cryptokiVersion %d.%d"
+	debug("provider %s: manufacturerID <%s> cryptokiVersion %d.%d"
 	    " libraryDescription <%s> libraryVersion %d.%d",
+	    provider_id,
 	    p->info.manufacturerID,
 	    p->info.cryptokiVersion.major,
 	    p->info.cryptokiVersion.minor,
@@ -654,13 +628,15 @@ pkcs11_add_provider(char *provider_id, char *pin, struct sshkey ***keyp)
 		goto fail;
 	}
 	if (p->nslots == 0) {
-		error("no slots");
+		debug("%s: provider %s returned no slots", __func__,
+		    provider_id);
 		goto fail;
 	}
 	p->slotlist = xcalloc(p->nslots, sizeof(CK_SLOT_ID));
 	if ((rv = f->C_GetSlotList(CK_TRUE, p->slotlist, &p->nslots))
 	    != CKR_OK) {
-		error("C_GetSlotList failed: %lu", rv);
+		error("C_GetSlotList for provider %s failed: %lu",
+		    provider_id, rv);
 		goto fail;
 	}
 	p->slotinfo = xcalloc(p->nslots, sizeof(struct pkcs11_slotinfo));
@@ -670,20 +646,23 @@ pkcs11_add_provider(char *provider_id, char *pin, struct sshkey ***keyp)
 		token = &p->slotinfo[i].token;
 		if ((rv = f->C_GetTokenInfo(p->slotlist[i], token))
 		    != CKR_OK) {
-			error("C_GetTokenInfo failed: %lu", rv);
+			error("C_GetTokenInfo for provider %s slot %lu "
+			    "failed: %lu", provider_id, (unsigned long)i, rv);
 			continue;
 		}
 		if ((token->flags & CKF_TOKEN_INITIALIZED) == 0) {
-			debug2("%s: ignoring uninitialised token in slot %lu",
-			    __func__, (unsigned long)i);
+			debug2("%s: ignoring uninitialised token in "
+			    "provider %s slot %lu", __func__,
+			    provider_id, (unsigned long)i);
 			continue;
 		}
 		rmspace(token->label, sizeof(token->label));
 		rmspace(token->manufacturerID, sizeof(token->manufacturerID));
 		rmspace(token->model, sizeof(token->model));
 		rmspace(token->serialNumber, sizeof(token->serialNumber));
-		debug("label <%s> manufacturerID <%s> model <%s> serial <%s>"
-		    " flags 0x%lx",
+		debug("provider %s slot %lu: label <%s> manufacturerID <%s> "
+		    "model <%s> serial <%s> flags 0x%lx",
+		    provider_id, (unsigned long)i,
 		    token->label, token->manufacturerID, token->model,
 		    token->serialNumber, token->flags);
 		/* open session, login with pin and retrieve public keys */
@@ -695,24 +674,19 @@ pkcs11_add_provider(char *provider_id, char *pin, struct sshkey ***keyp)
 		p->refcount++;	/* add to provider list */
 		return (nkeys);
 	}
-	error("no keys");
+	debug("%s: provider %s returned no keys", __func__, provider_id);
 	/* don't add the provider, since it does not have any keys */
 fail:
 	if (need_finalize && (rv = f->C_Finalize(NULL)) != CKR_OK)
-		error("C_Finalize failed: %lu", rv);
+		error("C_Finalize for provider %s failed: %lu",
+		    provider_id, rv);
 	if (p) {
 		free(p->slotlist);
 		free(p->slotinfo);
 		free(p);
 	}
-  #ifdef WIN32_FIXME
-	if (handle)
-		FreeLibrary(handle);
-  #else
 	if (handle)
 		dlclose(handle);
-  #endif/*WIN32_FIXME*/
-	
 	return (-1);
 }
 

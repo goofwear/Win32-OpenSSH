@@ -50,20 +50,12 @@ static int _in_raw_mode = 0;
 struct termios *
 get_saved_tio(void)
 {
-  #ifdef WIN32_FIXME
-  DebugBreak();
-  #endif
 	return _in_raw_mode ? &_saved_tio : NULL;
 }
 
 void
 leave_raw_mode(int quiet)
 {
-  /*
-   * Win32 has no ttys so there is no raw mode to leave 
-   */
-   
-#ifndef WIN32_FIXME
 	if (!_in_raw_mode)
 		return;
 	if (tcsetattr(fileno(stdin), TCSADRAIN, &_saved_tio) == -1) {
@@ -71,17 +63,11 @@ leave_raw_mode(int quiet)
 			perror("tcsetattr");
 	} else
 		_in_raw_mode = 0;
-#endif
 }
 
 void
 enter_raw_mode(int quiet)
 {
-  /*
-   * Win32 has no ttys so there is no raw mode to enter 
-   */
-   
-#ifndef WIN32_FIXME
 	struct termios tio;
 
 	if (tcgetattr(fileno(stdin), &tio) == -1) {
@@ -107,5 +93,4 @@ enter_raw_mode(int quiet)
 			perror("tcsetattr");
 	} else
 		_in_raw_mode = 1;
-#endif
 }

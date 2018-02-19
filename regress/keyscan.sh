@@ -1,4 +1,4 @@
-#	$OpenBSD: keyscan.sh,v 1.4 2015/03/03 22:35:19 markus Exp $
+#	$OpenBSD: keyscan.sh,v 1.6 2017/04/30 23:34:55 djm Exp $
 #	Placed in the Public Domain.
 
 tid="keyscan"
@@ -8,11 +8,7 @@ rm -f ${OBJ}/host.dsa
 
 start_sshd
 
-KEYTYPES="rsa dsa"
-if ssh_version 1; then
-	KEYTYPES="${KEYTYPES} rsa1"
-fi
-
+KEYTYPES=`${SSH} -Q key-plain`
 for t in $KEYTYPES; do
 	trace "keyscan type $t"
 	${SSHKEYSCAN} -t $t -p $PORT 127.0.0.1 127.0.0.1 127.0.0.1 \

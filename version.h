@@ -1,14 +1,6 @@
-/* $OpenBSD: version.h,v 1.75 2015/08/21 03:45:26 djm Exp $ */
+/* $OpenBSD: version.h,v 1.80 2017/09/30 22:26:33 djm Exp $ */
 
-#define SSH_VERSION	"OpenSSH_7.1"
+#define SSH_VERSION	"OpenSSH_7.6"
 
-#ifndef WIN32_FIXME
 #define SSH_PORTABLE	"p1"
-#else
-#ifdef WIN32_VS
-#define SSH_PORTABLE	"p1 Microsoft_Win32_port_with_VS"
-#else
-#define SSH_PORTABLE	"p1 Microsoft_Win32_port"
-#endif
-#endif
 #define SSH_RELEASE	SSH_VERSION SSH_PORTABLE

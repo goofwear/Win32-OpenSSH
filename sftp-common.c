@@ -1,4 +1,4 @@
-/* $OpenBSD: sftp-common.c,v 1.28 2015/01/20 23:14:00 deraadt Exp $ */
+/* $OpenBSD: sftp-common.c,v 1.30 2017/06/10 06:36:46 djm Exp $ */
 /*
  * Copyright (c) 2001 Markus Friedl.  All rights reserved.
  * Copyright (c) 2001 Damien Miller.  All rights reserved.
@@ -26,19 +26,6 @@
 
 #include "includes.h"
 
-/*
- * We support only client side kerberos on Windows.
- */
-
-#ifdef WIN32_FIXME
-  #undef GSSAPI
-  #undef KRB5
-
-void strmode(mode_t mode, char *p);
-void strmode_from_attrib(unsigned attrib, char *p);
-#endif
-
-#include <sys/param.h>	/* MAX */
 #include <sys/types.h>
 #include <sys/stat.h>
 
@@ -57,6 +44,7 @@ void strmode_from_attrib(unsigned attrib, char *p);
 #include "ssherr.h"
 #include "sshbuf.h"
 #include "log.h"
+#include "misc.h"
 
 #include "sftp.h"
 #include "sftp-common.h"
@@ -228,40 +216,21 @@ ls_file(const char *name, const struct stat *st, int remote, int si_units)
 	int ulen, glen, sz = 0;
 	struct tm *ltime = localtime(&st->st_mtime);
 	char *user, *group;
-	char buf[1024], mode[11+1], tbuf[12+1], ubuf[11+1], gbuf[11+1];
+	char buf[1024], lc[8], mode[11+1], tbuf[12+1], ubuf[11+1], gbuf[11+1];
 	char sbuf[FMT_SCALED_STRSIZE];
 	time_t now;
 
-#ifndef WIN32_FIXME
 	strmode(st->st_mode, mode);
-#else
-	strmode(st->st_mode, mode);
-	strmode_from_attrib(remote, mode);
-#endif
-	if (!remote) {
-		user = user_from_uid(st->st_uid, 0);
-		#ifdef WIN32_FIXME
-		snprintf(gbuf, sizeof gbuf, "%u", (u_int)st->st_gid);
-		group = gbuf;
-		#endif
-	} else {
+	if (remote) {
 		snprintf(ubuf, sizeof ubuf, "%u", (u_int)st->st_uid);
 		user = ubuf;
-#ifdef WIN32_FIXME
-  
-  snprintf(gbuf, sizeof gbuf, "%u", (u_int) st -> st_gid);
-  
-  group = gbuf;
-
-#else
-	if (!remote) {
-		group = group_from_gid(st->st_gid, 0);
-	} else {
 		snprintf(gbuf, sizeof gbuf, "%u", (u_int)st->st_gid);
 		group = gbuf;
-	}
-#endif
-
+		strlcpy(lc, "?", sizeof(lc));
+	} else {
+		user = user_from_uid(st->st_uid, 0);
+		group = group_from_gid(st->st_gid, 0);
+		snprintf(lc, sizeof(lc), "%u", (u_int)st->st_nlink);
 	}
 	if (ltime != NULL) {
 		now = time(NULL);
@@ -273,297 +242,17 @@ ls_file(const char *name, const struct stat *st, int remote, int si_units)
 	}
 	if (sz == 0)
 		tbuf[0] = '\0';
-	ulen = MAX(strlen(user), 8);
-	glen = MAX(strlen(group), 8);
+	ulen = MAXIMUM(strlen(user), 8);
+	glen = MAXIMUM(strlen(group), 8);
 	if (si_units) {
 		fmt_scaled((long long)st->st_size, sbuf);
-		snprintf(buf, sizeof buf, "%s %3u %-*s %-*s %8s %s %s", mode,
-		    (u_int)st->st_nlink, ulen, user, glen, group,
+		snprintf(buf, sizeof buf, "%s %3s %-*s %-*s %8s %s %s",
+		    mode, lc, ulen, user, glen, group,
 		    sbuf, tbuf, name);
 	} else {
-		snprintf(buf, sizeof buf, "%s %3u %-*s %-*s %8llu %s %s", mode,
-		    (u_int)st->st_nlink, ulen, user, glen, group,
+		snprintf(buf, sizeof buf, "%s %3s %-*s %-*s %8llu %s %s",
+		    mode, lc, ulen, user, glen, group,
 		    (unsigned long long)st->st_size, tbuf, name);
 	}
 	return xstrdup(buf);
 }
-
-#ifdef WIN32_FIXME
-
-#include <sys/types.h>
-#include <windows.h>
-
-void
-strmode_from_attrib(unsigned attrib, char *p)
-{
-	if (attrib & FILE_ATTRIBUTE_REPARSE_POINT)
-		*p = 'l';
-	else if (attrib & FILE_ATTRIBUTE_DIRECTORY)
-		*p = 'd';
-	else
-		*p = '-';
-}
-
-
-void
-strmode(mode_t mode, char *p)
-{
-	/* print type */
-	switch (mode & S_IFMT) {
-	case S_IFDIR:			/* directory */
-		*p++ = 'd';
-		break;
-	case S_IFCHR:			/* character special */
-		*p++ = 'c';
-		break;
-		//case S_IFBLK:			/* block special */
-		//		*p++ = 'b';
-		//		break;
-	case S_IFREG:			/* regular */
-		*p++ = '-';
-		break;
-		//case S_IFLNK:			/* symbolic link */
-		//		*p++ = 'l';
-		//		break;
-#ifdef S_IFSOCK
-	case S_IFSOCK:			/* socket */
-		*p++ = 's';
-		break;
-#endif
-	case _S_IFIFO:			/* fifo */
-		*p++ = 'p';
-		break;
-	default:			/* unknown */
-		*p++ = '?';
-		break;
-	}
-	/* usr */
-	if (mode & S_IRUSR)
-		*p++ = 'r';
-	else
-		*p++ = '-';
-	if (mode & S_IWUSR)
-		*p++ = 'w';
-	else
-		*p++ = '-';
-	switch (mode & (S_IXUSR)) {
-	case 0:
-		*p++ = '-';
-		break;
-	case S_IXUSR:
-		*p++ = 'x';
-		break;
-		//case S_ISUID:
-		//		*p++ = 'S';
-		//		break;
-		//case S_IXUSR | S_ISUID:
-		//		*p++ = 's';
-		//		break;
-	}
-	/* group */
-	if (mode & S_IRGRP)
-		*p++ = 'r';
-	else
-		*p++ = '-';
-	if (mode & S_IWGRP)
-		*p++ = 'w';
-	else
-		*p++ = '-';
-	switch (mode & (S_IXGRP)) {
-	case 0:
-		*p++ = '-';
-		break;
-	case S_IXGRP:
-		*p++ = 'x';
-		break;
-		//case S_ISGID:
-		//		*p++ = 'S';
-		//		break;
-		//case S_IXGRP | S_ISGID:
-		//		*p++ = 's';
-		//		break;
-	}
-	/* other */
-	if (mode & S_IROTH)
-		*p++ = 'r';
-	else
-		*p++ = '-';
-	if (mode & S_IWOTH)
-		*p++ = 'w';
-	else
-		*p++ = '-';
-	switch (mode & (S_IXOTH)) {
-	case 0:
-		*p++ = '-';
-		break;
-	case S_IXOTH:
-		*p++ = 'x';
-		break;
-	}
-	*p++ = ' ';		/* will be a '+' if ACL's implemented */
-	*p = '\0';
-}
-
-#include <winioctl.h>
-// Maximum reparse buffer info size. The max user defined reparse 
-// data is 16KB, plus there's a header. 
-// 
-#define MAX_REPARSE_SIZE	17000 
-
-#define IO_REPARSE_TAG_SYMBOLIC_LINK      IO_REPARSE_TAG_RESERVED_ZERO 
-#define IO_REPARSE_TAG_MOUNT_POINT              (0xA0000003L)       // winnt ntifs 
-#define IO_REPARSE_TAG_HSM                      (0xC0000004L)       // winnt ntifs 
-#define IO_REPARSE_TAG_SIS                      (0x80000007L)       // winnt ntifs 
-
-
-// 
-// Undocumented FSCTL_SET_REPARSE_POINT structure definition 
-// 
-#define REPARSE_MOUNTPOINT_HEADER_SIZE   8 
-typedef struct {
-	DWORD          ReparseTag;
-	DWORD          ReparseDataLength;
-	WORD           Reserved;
-	WORD           ReparseTargetLength;
-	WORD           ReparseTargetMaximumLength;
-	WORD           Reserved1;
-	WCHAR          ReparseTarget[1];
-} REPARSE_MOUNTPOINT_DATA_BUFFER, *PREPARSE_MOUNTPOINT_DATA_BUFFER;
-
-
-typedef struct _REPARSE_DATA_BUFFER {
-	ULONG  ReparseTag;
-	USHORT ReparseDataLength;
-	USHORT Reserved;
-	union {
-		struct {
-			USHORT SubstituteNameOffset;
-			USHORT SubstituteNameLength;
-			USHORT PrintNameOffset;
-			USHORT PrintNameLength;
-			WCHAR PathBuffer[1];
-		} SymbolicLinkReparseBuffer;
-		struct {
-			USHORT SubstituteNameOffset;
-			USHORT SubstituteNameLength;
-			USHORT PrintNameOffset;
-			USHORT PrintNameLength;
-			WCHAR PathBuffer[1];
-		} MountPointReparseBuffer;
-		struct {
-			UCHAR  DataBuffer[1];
-		} GenericReparseBuffer;
-	};
-} REPARSE_DATA_BUFFER, *PREPARSE_DATA_BUFFER;
-
-BOOL ResolveLink(char * tLink, char *ret, DWORD * plen, DWORD Flags)
-{
-	HANDLE   fileHandle;
-	BYTE     reparseBuffer[MAX_REPARSE_SIZE];
-	PBYTE    reparseData;
-	PREPARSE_GUID_DATA_BUFFER reparseInfo = (PREPARSE_GUID_DATA_BUFFER)reparseBuffer;
-	PREPARSE_DATA_BUFFER msReparseInfo = (PREPARSE_DATA_BUFFER)reparseBuffer;
-	DWORD   returnedLength;
-
-	if (Flags & FILE_ATTRIBUTE_DIRECTORY)
-	{
-		fileHandle = CreateFile(tLink, 0,
-			FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-			OPEN_EXISTING,
-			FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, 0);
-
-	}
-	else {
-
-		//    
-		// Open the file    
-		//    
-		fileHandle = CreateFile(tLink, 0,
-			FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-			OPEN_EXISTING,
-			FILE_FLAG_OPEN_REPARSE_POINT, 0);
-	}
-	if (fileHandle == INVALID_HANDLE_VALUE)
-	{
-		sprintf_s(ret, *plen, "%s", tLink);
-		return TRUE;
-	}
-
-	if (GetFileAttributes(tLink) & FILE_ATTRIBUTE_REPARSE_POINT) {
-
-		if (DeviceIoControl(fileHandle, FSCTL_GET_REPARSE_POINT,
-			NULL, 0, reparseInfo, sizeof(reparseBuffer),
-			&returnedLength, NULL)) {
-
-			if (IsReparseTagMicrosoft(reparseInfo->ReparseTag)) {
-
-				switch (reparseInfo->ReparseTag) {
-				case 0x80000000 | IO_REPARSE_TAG_SYMBOLIC_LINK:
-				case IO_REPARSE_TAG_MOUNT_POINT:
-					if (*plen >= msReparseInfo->MountPointReparseBuffer.SubstituteNameLength)
-					{
-						reparseData = (PBYTE)&msReparseInfo->SymbolicLinkReparseBuffer.PathBuffer;
-						WCHAR temp[1024];
-						wcsncpy_s(temp, 1024,
-							(PWCHAR)(reparseData + msReparseInfo->MountPointReparseBuffer.SubstituteNameOffset),
-							(size_t)msReparseInfo->MountPointReparseBuffer.SubstituteNameLength);
-						temp[msReparseInfo->MountPointReparseBuffer.SubstituteNameLength] = 0;
-						sprintf_s(ret, *plen, "%S", &temp[4]);
-					}
-					else
-					{
-						sprintf_s(ret, *plen, "%s", tLink);
-						return FALSE;
-					}
-
-					break;
-				default:
-					break;
-				}
-			}
-		}
-	}
-	else {
-		sprintf_s(ret, *plen, "%s", tLink);
-	}
-
-	CloseHandle(fileHandle);
-	return TRUE;
-}
-
-char * get_inside_path(char * opath, BOOL bResolve, BOOL bMustExist)
-{
-	BOOL ResolveLink(char * tLink, char *ret, DWORD * plen, DWORD Flags);
-
-	char * ipath;
-	char * temp_name;
-	char temp[1024];
-	DWORD templen = sizeof(temp);
-	WIN32_FILE_ATTRIBUTE_DATA  FileInfo;
-
-
-	if (!GetFileAttributesEx(opath, GetFileExInfoStandard, &FileInfo) && bMustExist)
-	{
-		return NULL;
-	}
-
-	if (bResolve)
-	{
-		ResolveLink(opath, temp, &templen, FileInfo.dwFileAttributes);
-		ipath = xstrdup(temp);
-	}
-	else
-	{
-		ipath = xstrdup(opath);
-	}
-
-	return ipath;
-}
-
-// if file is symbolic link, copy its link into "link" .
-int readlink(const char *path, char *link, int linklen)
-{
-	strcpy_s(link, linklen, path);
-	return 0;
-}
-#endif

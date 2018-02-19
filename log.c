@@ -1,4 +1,4 @@
-/* $OpenBSD: log.c,v 1.46 2015/07/08 19:04:21 markus Exp $ */
+/* $OpenBSD: log.c,v 1.50 2017/05/17 01:24:17 djm Exp $ */
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
  * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
@@ -51,15 +51,6 @@
 #endif
 
 #include "log.h"
-
-#ifdef WIN32_FIXME
-
-  #include <fcntl.h>
-  #include <Shlwapi.h>
-  
-  int logfd = 0;
-
-#endif
 
 static LogLevel log_level = SYSLOG_LEVEL_INFO;
 static int log_on_stderr = 1;
@@ -185,6 +176,16 @@ sigdie(const char *fmt,...)
 	_exit(1);
 }
 
+void
+logdie(const char *fmt,...)
+{
+	va_list args;
+
+	va_start(args, fmt);
+	do_log(SYSLOG_LEVEL_INFO, fmt, args);
+	va_end(args);
+	cleanup_exit(255);
+}
 
 /* Log this message (information that usually should go to the log). */
 
@@ -255,18 +256,7 @@ log_init(char *av0, LogLevel level, SyslogFacility facility, int on_stderr)
 
 	argv0 = av0;
 
-	switch (level) {
-	case SYSLOG_LEVEL_QUIET:
-	case SYSLOG_LEVEL_FATAL:
-	case SYSLOG_LEVEL_ERROR:
-	case SYSLOG_LEVEL_INFO:
-	case SYSLOG_LEVEL_VERBOSE:
-	case SYSLOG_LEVEL_DEBUG1:
-	case SYSLOG_LEVEL_DEBUG2:
-	case SYSLOG_LEVEL_DEBUG3:
-		log_level = level;
-		break;
-	default:
+	if (log_change_level(level) != 0) {
 		fprintf(stderr, "Unrecognized internal syslog level code %d\n",
 		    (int) level);
 		exit(1);
@@ -339,19 +329,33 @@ log_init(char *av0, LogLevel level, SyslogFacility facility, int on_stderr)
 #endif
 }
 
-void
+int
 log_change_level(LogLevel new_log_level)
 {
 	/* no-op if log_init has not been called */
 	if (argv0 == NULL)
-		return;
-	log_init(argv0, new_log_level, log_facility, log_on_stderr);
+		return 0;
+
+	switch (new_log_level) {
+	case SYSLOG_LEVEL_QUIET:
+	case SYSLOG_LEVEL_FATAL:
+	case SYSLOG_LEVEL_ERROR:
+	case SYSLOG_LEVEL_INFO:
+	case SYSLOG_LEVEL_VERBOSE:
+	case SYSLOG_LEVEL_DEBUG1:
+	case SYSLOG_LEVEL_DEBUG2:
+	case SYSLOG_LEVEL_DEBUG3:
+		log_level = new_log_level;
+		return 0;
+	default:
+		return -1;
+	}
 }
 
 int
 log_is_on_stderr(void)
 {
-	return log_on_stderr;
+	return log_on_stderr && log_stderr_fd == STDERR_FILENO;
 }
 
 /* redirect what would usually get written to stderr to specified file */
@@ -443,50 +447,19 @@ do_log(LogLevel level, const char *fmt, va_list args)
 	} else {
 		vsnprintf(msgbuf, sizeof(msgbuf), fmt, args);
 	}
-#ifdef WIN32_FIXME
-  strncpy(fmtbuf, msgbuf, sizeof(fmtbuf));
-#else
 	strnvis(fmtbuf, msgbuf, sizeof(fmtbuf),
 	    log_on_stderr ? LOG_STDERR_VIS : LOG_SYSLOG_VIS);
-#endif
-
-#ifndef WIN32_FIXME
 	if (log_handler != NULL) {
 		/* Avoid recursion */
 		tmp_handler = log_handler;
 		log_handler = NULL;
 		tmp_handler(level, fmtbuf, log_handler_ctx);
 		log_handler = tmp_handler;
-	} else 
-#endif	
-	if (log_on_stderr) {
-		snprintf(msgbuf, sizeof msgbuf, "%s\r\n", fmtbuf);
-#ifdef WIN32_FIXME
-    _write(STDERR_FILENO, msgbuf, strlen(msgbuf));
-#else  
-	(void)write(log_stderr_fd, msgbuf, strlen(msgbuf));
-#endif
-		
+	} else if (log_on_stderr) {
+		snprintf(msgbuf, sizeof msgbuf, "%.*s\r\n",
+		    (int)sizeof msgbuf - 3, fmtbuf);
+		(void)write(log_stderr_fd, msgbuf, strlen(msgbuf));
 	} else {
-
-  #ifdef WIN32_FIXME
-    
-    if (logfd > 0)
-    {
-      char msgbufTimestamp[MSGBUFSIZ];
-      
-      SYSTEMTIME st;
-      
-      GetLocalTime(&st);
-
-      snprintf(msgbufTimestamp, sizeof msgbufTimestamp, "%d %02d:%02d:%02d %03d %s\n",
-                   GetCurrentProcessId(), st.wHour, st.wMinute, st.wSecond, 
-                       st.wMilliseconds, msgbuf);
-      
-      _write(logfd, msgbufTimestamp, strlen(msgbufTimestamp));
-    }
- 
-  #else 
 #if defined(HAVE_OPENLOG_R) && defined(SYSLOG_DATA_INIT)
 		openlog_r(argv0 ? argv0 : __progname, LOG_PID, log_facility, &sdata);
 		syslog_r(pri, &sdata, "%.500s", fmtbuf);
@@ -495,7 +468,6 @@ do_log(LogLevel level, const char *fmt, va_list args)
 		openlog(argv0 ? argv0 : __progname, LOG_PID, log_facility);
 		syslog(pri, "%.500s", fmtbuf);
 		closelog();
-#endif
 #endif
 	}
 	errno = saved_errno;

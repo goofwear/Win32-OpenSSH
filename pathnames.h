@@ -1,4 +1,4 @@
-/* $OpenBSD: pathnames.h,v 1.24 2013/12/06 13:39:49 markus Exp $ */
+/* $OpenBSD: pathnames.h,v 1.27 2017/05/05 10:42:49 naddy Exp $ */
 
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
@@ -34,46 +34,23 @@
  * Of these, ssh_host_key must be readable only by root, whereas ssh_config
  * should be world-readable.
  */
- 
-#ifdef WIN32_FIXME
-# define _PATH_SERVER_CONFIG_FILE  "sshd_config"
-# define _PATH_HOST_CONFIG_FILE    "ssh_config"
-# define _PATH_HOST_KEY_FILE       "ssh_host_key"
-# define _PATH_HOST_DSA_KEY_FILE   "ssh_host_dsa_key"
-# define _PATH_HOST_ECDSA_KEY_FILE "ssh_host_ecdsa_key"
-# define _PATH_HOST_ED25519_KEY_FILE	"ssh_host_ed25519_key"
-# define _PATH_HOST_RSA_KEY_FILE   "ssh_host_rsa_key"
-# define _PATH_DH_MODULI           "moduli"
-# define _PATH_DH_PRIMES           "primes"
-# define _PATH_SSH_PROGRAM         "ssh.exe"
-
-#else
-	
 #define _PATH_SERVER_CONFIG_FILE	SSHDIR "/sshd_config"
 #define _PATH_HOST_CONFIG_FILE		SSHDIR "/ssh_config"
-#define _PATH_HOST_KEY_FILE		SSHDIR "/ssh_host_key"
 #define _PATH_HOST_DSA_KEY_FILE		SSHDIR "/ssh_host_dsa_key"
 #define _PATH_HOST_ECDSA_KEY_FILE	SSHDIR "/ssh_host_ecdsa_key"
 #define _PATH_HOST_ED25519_KEY_FILE	SSHDIR "/ssh_host_ed25519_key"
 #define _PATH_HOST_RSA_KEY_FILE		SSHDIR "/ssh_host_rsa_key"
 #define _PATH_DH_MODULI			SSHDIR "/moduli"
-/* Backwards compatibility */
-#define _PATH_DH_PRIMES			SSHDIR "/primes"
 
 #ifndef _PATH_SSH_PROGRAM
 #define _PATH_SSH_PROGRAM		"/usr/bin/ssh"
-#endif
 #endif
 
 /*
  * The process id of the daemon listening for connections is saved here to
  * make it easier to kill the correct daemon when necessary.
  */
-#ifndef WIN32_FIXME
 #define _PATH_SSH_DAEMON_PID_FILE	_PATH_SSH_PIDDIR "/sshd.pid"
-#else
-#define _PATH_SSH_DAEMON_PID_FILE "sshd.pid"
-#endif
 
 /*
  * The directory in user's home directory in which the files reside. The
@@ -94,7 +71,6 @@
  * Name of the default file containing client-side authentication key. This
  * file should only be readable by the user him/herself.
  */
-#define _PATH_SSH_CLIENT_IDENTITY	_PATH_SSH_USER_DIR "/identity"
 #define _PATH_SSH_CLIENT_ID_DSA		_PATH_SSH_USER_DIR "/id_dsa"
 #define _PATH_SSH_CLIENT_ID_ECDSA	_PATH_SSH_USER_DIR "/id_ecdsa"
 #define _PATH_SSH_CLIENT_ID_RSA		_PATH_SSH_USER_DIR "/id_rsa"
@@ -156,14 +132,8 @@
 
 /* xauth for X11 forwarding */
 #ifndef _PATH_XAUTH
-#ifdef WIN32_FIXME
-#define _PATH_XAUTH			"./auth.exe"
-#else
 #define _PATH_XAUTH			"/usr/X11R6/bin/xauth"
 #endif
-#endif
-
-
 
 /* UNIX domain socket for X11 server; displaynum will replace %u */
 #ifndef _PATH_UNIX_X
@@ -176,15 +146,9 @@
 #endif
 
 /* for sftp */
-#ifdef WIN32_FIXME
-  #ifndef _PATH_SFTP_SERVER
-  #define _PATH_SFTP_SERVER "./sftp-server.exe"
-  #endif
-#else
 #ifndef _PATH_SFTP_SERVER
 #define _PATH_SFTP_SERVER		"/usr/libexec/sftp-server"
 #endif
-#endif /* else WIN32_FIXME */
 
 /* chroot directory for unprivileged user when UsePrivilegeSeparation=yes */
 #ifndef _PATH_PRIVSEP_CHROOT_DIR
@@ -199,15 +163,6 @@
 #ifndef _PATH_LS
 #define _PATH_LS			"ls"
 #endif
-
-/* path to login program */
-#ifndef LOGIN_PROGRAM
-# ifdef LOGIN_PROGRAM_FALLBACK
-#  define LOGIN_PROGRAM         LOGIN_PROGRAM_FALLBACK
-# else
-#  define LOGIN_PROGRAM         "/usr/bin/login"
-# endif
-#endif /* LOGIN_PROGRAM */
 
 /* Askpass program define */
 #ifndef ASKPASS_PROGRAM

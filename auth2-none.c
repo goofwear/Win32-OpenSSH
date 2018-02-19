@@ -1,4 +1,4 @@
-/* $OpenBSD: auth2-none.c,v 1.18 2014/07/15 15:54:14 millert Exp $ */
+/* $OpenBSD: auth2-none.c,v 1.20 2017/05/30 14:29:59 markus Exp $ */
 /*
  * Copyright (c) 2000 Markus Friedl.  All rights reserved.
  *
@@ -25,15 +25,6 @@
 
 #include "includes.h"
 
-/*
- * We support only client side kerberos on Windows.
- */
-
-#ifdef WIN32_FIXME
-  #undef GSSAPI
-  #undef KRB5
-#endif
-
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
@@ -46,7 +37,7 @@
 
 #include "atomicio.h"
 #include "xmalloc.h"
-#include "key.h"
+#include "sshkey.h"
 #include "hostfile.h"
 #include "auth.h"
 #include "packet.h"
@@ -56,6 +47,7 @@
 #include "servconf.h"
 #include "compat.h"
 #include "ssh2.h"
+#include "ssherr.h"
 #ifdef GSSAPI
 #include "ssh-gss.h"
 #endif
@@ -68,12 +60,15 @@ extern ServerOptions options;
 static int none_enabled = 1;
 
 static int
-userauth_none(Authctxt *authctxt)
+userauth_none(struct ssh *ssh)
 {
+	int r;
+
 	none_enabled = 0;
-	packet_check_eom();
+	if ((r = sshpkt_get_end(ssh)) != 0)
+		fatal("%s: %s", __func__, ssh_err(r));
 	if (options.permit_empty_passwd && options.password_authentication)
-		return (PRIVSEP(auth_password(authctxt, "")));
+		return (PRIVSEP(auth_password(ssh->authctxt, "")));
 	return (0);
 }
 

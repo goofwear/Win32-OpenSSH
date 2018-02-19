@@ -22,12 +22,6 @@
 #define _GNU_SOURCE /* activate extra prototypes for glibc */
 #endif
 
-#ifdef WIN32
-  #undef __USE_W32_SOCKETS
-  #include <winsock2.h>
-  #include <sys/compat-types.h>
-#endif
-
 #include <sys/types.h>
 #include <sys/param.h>
 #include <sys/socket.h> /* For CMSG_* */
@@ -37,12 +31,6 @@
 #endif
 #ifdef HAVE_BSTRING_H
 # include <bstring.h>
-#endif
-#if defined(HAVE_GLOB_H) && defined(GLOB_HAS_ALTDIRFUNC) && \
-    defined(GLOB_HAS_GL_MATCHC) && defined(GLOB_HAS_GL_STATV) && \
-    defined(HAVE_DECL_GLOB_NOMATCH) &&  HAVE_DECL_GLOB_NOMATCH != 0 && \
-    !defined(BROKEN_GLOB)
-# include <glob.h>
 #endif
 #ifdef HAVE_ENDIAN_H
 # include <endian.h>
@@ -105,6 +93,9 @@
 #ifdef HAVE_SYS_SYSMACROS_H
 # include <sys/sysmacros.h> /* For MIN, MAX, etc */
 #endif
+#ifdef HAVE_SYS_TIME_H
+# include <sys/time.h> /* for timespeccmp if present */
+#endif
 #ifdef HAVE_SYS_MMAN_H
 #include <sys/mman.h> /* for MAP_ANONYMOUS */
 #endif
@@ -127,11 +118,7 @@
 #if defined(HAVE_SECURITY_PAM_APPL_H)
 # include <security/pam_appl.h>
 #elif defined (HAVE_PAM_PAM_APPL_H)
-#ifdef WIN32_FIXME
-# include <security/pam_appl.h>
-#else
 # include <pam/pam_appl.h>
-#endif
 #endif
 #endif
 #ifdef HAVE_READPASSPHRASE_H
@@ -188,11 +175,5 @@
 #include "openbsd-compat/bsd-nextstep.h"
 
 #include "entropy.h"
-
-#ifdef WIN32_FIXME
-  #define signal(X, Y)
-  #define alarm(X)
-  #define mysignal(X, Y)
-#endif
 
 #endif /* INCLUDES_H */

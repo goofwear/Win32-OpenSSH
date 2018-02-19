@@ -1,5 +1,3 @@
-/* $Id: audit.c,v 1.6 2011/01/17 10:15:30 dtucker Exp $ */
-
 /*
  * Copyright (c) 2004, 2005 Darren Tucker.  All rights reserved.
  *
@@ -25,15 +23,6 @@
  */
 
 #include "includes.h"
-
-/*
- * We support only client side kerberos on Windows.
- */
-
-#ifdef WIN32_FIXME
-  #undef GSSAPI
-  #undef KRB5
-#endif
 
 #include <stdarg.h>
 #include <string.h>

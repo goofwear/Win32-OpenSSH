@@ -1,4 +1,4 @@
-/* $OpenBSD: auth-passwd.c,v 1.44 2014/07/15 15:54:14 millert Exp $ */
+/* $OpenBSD: auth-passwd.c,v 1.45 2016/07/21 01:39:35 dtucker Exp $ */
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
  * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
@@ -37,18 +37,6 @@
  */
 
 #include "includes.h"
-#ifdef WIN32_FIXME
-#include "xmalloc.h"
-#endif
-
-/*
- * We support only client side kerberos on Windows.
- */
-
-#ifdef WIN32_FIXME
-  #undef GSSAPI
-  #undef KRB5
-#endif
 
 #include <sys/types.h>
 
@@ -66,6 +54,12 @@
 #include "hostfile.h"
 #include "auth.h"
 #include "auth-options.h"
+#include "authfd.h"
+
+#ifdef WINDOWS
+#include "logonuser.h"
+#include "monitor_wrap.h"
+#endif
 
 extern Buffer loginmsg;
 extern ServerOptions options;
@@ -77,6 +71,8 @@ extern login_cap_t *lc;
 
 #define DAY		(24L * 60 * 60) /* 1 day in seconds */
 #define TWO_WEEKS	(2L * 7 * DAY)	/* 2 weeks in seconds */
+
+#define MAX_PASSWORD_LEN	1024
 
 void
 disable_forwarding(void)
@@ -98,6 +94,9 @@ auth_password(Authctxt *authctxt, const char *password)
 #if defined(USE_SHADOW) && defined(HAS_SHADOW_EXPIRE)
 	static int expire_checked = 0;
 #endif
+
+	if (strlen(password) > MAX_PASSWORD_LEN)
+		return 0;
 
 #ifndef HAVE_CYGWIN
 	if (pw->pw_uid == 0 && options.permit_root_login != PERMIT_YES)
@@ -200,221 +199,12 @@ sys_auth_passwd(Authctxt *authctxt, const char *password)
 		return (auth_close(as));
 	}
 }
-
-#elif defined(WIN32_FIXME)
-int sys_auth_passwd(Authctxt *authctxt, const char *password)
-{
-  /* 
-   * Authenticate on Windows 
-   */
-   
-  struct passwd *pw = authctxt -> pw;
-
-  HANDLE hToken = INVALID_HANDLE_VALUE;
-  
-  BOOL worked = FALSE;
-  
-  LPWSTR user_UTF16     = NULL;
-  LPWSTR password_UTF16 = NULL;
-  LPWSTR domain_UTF16   = NULL;
-
-  int buffer_size = 0;
-  
-  /*
-   * Identify domain or local login.
-   */
-
-  char *username = authctxt->user;
-
-  char *domainslash = strchr(authctxt->user, '\\');
-  if (domainslash) {
-	  // domain\username format
-	  char *domainname = authctxt->user;
-	  *domainslash = '\0';
-	  username = ++domainslash; // username is past the domain \ is the username
-
- 	  // Convert domainname from UTF-8 to UTF-16
-	  buffer_size = MultiByteToWideChar(CP_UTF8, 0, domainname, -1, NULL, 0);
-
-	  if (buffer_size > 0)
-	  {
-		  domain_UTF16 = xmalloc(4 * buffer_size);
-	  }
-	  else
-	  {
-		  return 0;
-	  }
-
-	  if (0 == MultiByteToWideChar(CP_UTF8, 0, domainname,
-		  -1, domain_UTF16, buffer_size))
-	  {
-		  free(domain_UTF16);
-
-		  return 0;
-	  }
-  }
-  else if (domainslash = strchr(authctxt->user, '@')) {
-	  // username@domain format
-	  username = authctxt->user;
-	  *domainslash = '\0';
-	  char *domainname = ++domainslash; // domainname is past the user@
-
-								// Convert domainname from UTF-8 to UTF-16
-	  buffer_size = MultiByteToWideChar(CP_UTF8, 0, domainname, -1, NULL, 0);
-
-	  if (buffer_size > 0)
-	  {
-		  domain_UTF16 = xmalloc(4 * buffer_size);
-	  }
-	  else
-	  {
-		  return 0;
-	  }
-
-	  if (0 == MultiByteToWideChar(CP_UTF8, 0, domainname,
-		  -1, domain_UTF16, buffer_size))
-	  {
-		  free(domain_UTF16);
-
-		  return 0;
-	  }
-  }
-  else {
-	  domain_UTF16 = strchr(authctxt->user, '@') ? NULL : L".";
-  }
-  
-  authctxt -> methoddata = hToken;
- 
-  if (domain_UTF16 == NULL)
-  {
-    debug3("Using domain logon...");
-  }
-  
-  /*
-   * Convert username from UTF-8 to UTF-16
-   */
- 
-  buffer_size = MultiByteToWideChar(CP_UTF8, 0, username, -1, NULL, 0);
-
-  if (buffer_size > 0)
-  {
-    user_UTF16 = xmalloc(4 * buffer_size);
-  }
-  else
-  {
-    return 0;
-  }
-  
-  if (0 == MultiByteToWideChar(CP_UTF8, 0, username,
-                                   -1, user_UTF16, buffer_size))
-  {
-    free(user_UTF16);
-
-    return 0;
-  }
-
-  /*
-   * Convert password from UTF-8 to UTF-16
-   */
-  
-  buffer_size = MultiByteToWideChar(CP_UTF8, 0, password, -1, NULL, 0);
-
-  if (buffer_size > 0)
-  {
-    password_UTF16 = xmalloc(4 * buffer_size);
-  }
-  else
-  {
-    return 0;
-  }
-  
-  if (0 == MultiByteToWideChar(CP_UTF8, 0, password, -1, 
-                                   password_UTF16 , buffer_size))
-  {
-    free(password_UTF16 );
-
-    return 0;
-  }
-
-  /*
-   * First, try logon in INTERACTIVE mode.
-   */
-  
-  worked = LogonUserW(user_UTF16, domain_UTF16, password_UTF16,
-                         LOGON32_LOGON_INTERACTIVE, 
-                             LOGON32_PROVIDER_DEFAULT, &hToken);
-                             
-  /*
-   * If no success, try NETWORK mode.
-   */
-   
-  if (!worked)
-  {
-    HANDLE weakToken = INVALID_HANDLE_VALUE;
-    
-    debug3("Netork login attemp [%s][%ls]...", 
-               username, domain_UTF16);
-    
-    worked = LogonUserW(user_UTF16, domain_UTF16, password_UTF16,
-                           LOGON32_LOGON_NETWORK,
-                               LOGON32_PROVIDER_DEFAULT, &weakToken);
-
-    if (worked)
-    {
-      debug("Duplicating token...");
-  
-      debug3(DuplicateTokenEx(weakToken, MAXIMUM_ALLOWED,
-                                  NULL, SecurityImpersonation,
-                                      TokenPrimary, &hToken) == 0);
-    }                                  
-  }
-  
-  free(user_UTF16);
-  free(password_UTF16);
-  if (domainslash) free(domain_UTF16);
-  
-  /*
-   * If login still fails, go out.
-   */
-   
-  if (!worked || hToken == INVALID_HANDLE_VALUE)
-  {
-    return 0;
-  }
-
-  /*
-   * Make sure this can be inherited for when 
-   * we start shells or commands.
-   */
-  
-  worked = SetHandleInformation(hToken, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
-  
-  if (!worked)
-  {
-    CloseHandle(hToken);
-    
-    hToken = INVALID_HANDLE_VALUE;
-    
-    authctxt -> methoddata = hToken;
-
-    return 0;
-  }
-
-  /*
-   * Save the handle (or invalid handle) as method-specific data.
-   */
-   
-  authctxt -> methoddata = hToken;
-
-  return 1;
-}
-
 #elif !defined(CUSTOM_SYS_AUTH_PASSWD)
 int
 sys_auth_passwd(Authctxt *authctxt, const char *password)
 {
 	struct passwd *pw = authctxt->pw;
-	char *encrypted_password;
+	char *encrypted_password, *salt = NULL;
 
 	/* Just use the supplied fake password if authctxt is invalid */
 	char *pw_password = authctxt->valid ? shadow_pw(pw) : pw->pw_passwd;
@@ -423,9 +213,13 @@ sys_auth_passwd(Authctxt *authctxt, const char *password)
 	if (strcmp(pw_password, "") == 0 && strcmp(password, "") == 0)
 		return (1);
 
-	/* Encrypt the candidate password using the proper salt. */
-	encrypted_password = xcrypt(password,
-	    (pw_password[0] && pw_password[1]) ? pw_password : "xx");
+	/*
+	 * Encrypt the candidate password using the proper salt, or pass a
+	 * NULL and let xcrypt pick one.
+	 */
+	if (authctxt->valid && pw_password[0] && pw_password[1])
+		salt = pw_password;
+	encrypted_password = xcrypt(password, salt);
 
 	/*
 	 * Authentication is accepted if the encrypted passwords
@@ -434,4 +228,99 @@ sys_auth_passwd(Authctxt *authctxt, const char *password)
 	return encrypted_password != NULL &&
 	    strcmp(encrypted_password, pw_password) == 0;
 }
-#endif
+
+#elif defined(WINDOWS)
+HANDLE password_auth_token = NULL;
+HANDLE process_custom_lsa_auth(char*, const char*, char*);
+
+void 
+sys_auth_passwd_lsa(Authctxt *authctxt, const char *password)
+{
+	char  *lsa_auth_pkg = NULL;
+	wchar_t *lsa_auth_pkg_w = NULL;
+	int domain_len = 0, lsa_auth_pkg_len = 0;	
+	HKEY reg_key = 0;
+	REGSAM mask = STANDARD_RIGHTS_READ | KEY_QUERY_VALUE | KEY_WOW64_64KEY;
+		
+	if ((RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\OpenSSH", 0, mask, &reg_key) == ERROR_SUCCESS) &&
+		(RegQueryValueExW(reg_key, L"LSAAuthenticationPackage", 0, NULL, NULL, &lsa_auth_pkg_len) == ERROR_SUCCESS)) {
+		lsa_auth_pkg_w = (wchar_t *) malloc(lsa_auth_pkg_len); // lsa_auth_pkg_len includes the null terminating character.
+		if (!lsa_auth_pkg_w)
+			fatal("%s: out of memory", __func__);
+
+		memset(lsa_auth_pkg_w, 0, lsa_auth_pkg_len);
+		if (RegQueryValueExW(reg_key, L"LSAAuthenticationPackage", 0, NULL, (LPBYTE)lsa_auth_pkg_w, &lsa_auth_pkg_len) == ERROR_SUCCESS) {
+			lsa_auth_pkg = utf16_to_utf8(lsa_auth_pkg_w);
+			if (!lsa_auth_pkg)
+				fatal("utf16_to_utf8 failed to convert lsa_auth_pkg_w:%ls", lsa_auth_pkg_w);
+
+			debug("Authenticating using LSA Auth Package:%ls", lsa_auth_pkg_w);
+			password_auth_token = process_custom_lsa_auth(authctxt->pw->pw_name, password, lsa_auth_pkg);
+		}
+	}
+
+done:
+	if (lsa_auth_pkg_w)
+		free(lsa_auth_pkg_w);
+
+	if (lsa_auth_pkg)
+		free(lsa_auth_pkg);
+
+	if (reg_key)
+		RegCloseKey(reg_key);
+}
+
+/*
+* Authenticate on Windows 
+* - Call LogonUser and retrieve user token
+* - If LogonUser fails, then try the LSA (Local Security Authority) authentication.
+*/
+int 
+sys_auth_passwd(Authctxt *authctxt, const char *password)
+{
+	wchar_t *user_utf16 = NULL, *udom_utf16 = NULL, *pwd_utf16 = NULL, *tmp;
+	HANDLE token = NULL;
+	int r = 0;
+
+	if ((user_utf16 = utf8_to_utf16(authctxt->pw->pw_name)) == NULL ||
+	    (pwd_utf16 = utf8_to_utf16(password)) == NULL) {
+		fatal("out of memory");
+		goto done;
+	}
+
+	if ((tmp = wcschr(user_utf16, L'@')) != NULL) {
+		udom_utf16 = tmp + 1;
+		*tmp = L'\0';
+	}
+
+	if (LogonUserExExWHelper(user_utf16, udom_utf16, pwd_utf16, LOGON32_LOGON_NETWORK_CLEARTEXT,
+	    LOGON32_PROVIDER_DEFAULT, NULL, &token, NULL, NULL, NULL, NULL) == TRUE)
+		password_auth_token = token;
+	else {
+		if (GetLastError() == ERROR_PASSWORD_MUST_CHANGE)
+			/*
+			* TODO - need to add support to force password change
+			* by sending back SSH_MSG_USERAUTH_PASSWD_CHANGEREQ
+			*/
+			error("password for user %s has expired", authctxt->pw->pw_name);
+		else {
+			debug("Windows authentication failed for user: %ls domain: %ls error:%d", user_utf16, udom_utf16, GetLastError());
+
+			/* If LSA authentication package is configured then it will return the auth_token */
+			sys_auth_passwd_lsa(authctxt, password);
+		}
+	}
+			
+done:
+	if (password_auth_token)
+		r = 1;
+
+	if (user_utf16)
+		free(user_utf16);
+
+	if (pwd_utf16)
+		SecureZeroMemory(pwd_utf16, sizeof(wchar_t) * wcslen(pwd_utf16));
+
+	return r;
+}
+#endif   /* WINDOWS */

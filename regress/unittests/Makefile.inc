@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile.inc,v 1.6 2015/07/01 23:11:18 djm Exp $
+#	$OpenBSD: Makefile.inc,v 1.11 2017/04/30 23:33:48 djm Exp $
 
 .include <bsd.own.mk>
 .include <bsd.obj.mk>
@@ -7,6 +7,7 @@
 WARNINGS=Yes
 
 DEBUG=-g
+CFLAGS+=	-fstack-protector-all
 CDIAGFLAGS=	-Wall
 CDIAGFLAGS+=	-Wextra
 CDIAGFLAGS+=	-Werror
@@ -29,7 +30,7 @@ CDIAGFLAGS+=	-Wswitch
 CDIAGFLAGS+=	-Wtrigraphs
 CDIAGFLAGS+=	-Wuninitialized
 CDIAGFLAGS+=	-Wunused
-.if ${COMPILER_VERSION} == "gcc4"
+.if ${COMPILER_VERSION:L} != "gcc3"
 CDIAGFLAGS+=	-Wpointer-sign
 CDIAGFLAGS+=	-Wold-style-definition
 .endif
@@ -48,11 +49,15 @@ DPADD+=${.CURDIR}/../test_helper/libtest_helper.a
 
 .if exists(${.CURDIR}/${SSHREL}/lib/${__objdir})
 LDADD+=-L${.CURDIR}/${SSHREL}/lib/${__objdir} -lssh
-DPADD+=${.CURDIR}/${SSHREL}/lib/${__objdir}/libssh.a
+LIBSSH=${.CURDIR}/${SSHREL}/lib/${__objdir}/libssh.a
 .else
 LDADD+=-L${.CURDIR}/${SSHREL}/lib -lssh
-DPADD+=${.CURDIR}/${SSHREL}/lib/libssh.a
+LIBSSH=${.CURDIR}/${SSHREL}/lib/libssh.a
 .endif
+DPADD+=${LIBSSH}
+${PROG}: ${LIBSSH}
+${LIBSSH}:
+	cd ${.CURDIR}/${SSHREL} && ${MAKE} lib
 
 LDADD+= -lcrypto
 DPADD+= ${LIBCRYPTO}

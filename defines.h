@@ -25,9 +25,6 @@
 #ifndef _DEFINES_H
 #define _DEFINES_H
 
-/* $Id: defines.h,v 1.183 2014/09/02 19:33:26 djm Exp $ */
-
-
 /* Constants */
 
 #if defined(HAVE_DECL_SHUT_RD) && HAVE_DECL_SHUT_RD == 0
@@ -40,6 +37,19 @@ enum
 # define SHUT_RD   SHUT_RD
 # define SHUT_WR   SHUT_WR
 # define SHUT_RDWR SHUT_RDWR
+#endif
+
+/*
+ * Cygwin doesn't really have a notion of reserved ports.  It is still
+ * is useful on the client side so for compatibility it defines as 1024 via
+ * netinet/in.h inside an enum.  We * don't actually want that restriction
+ * so we want to set that to zero, but we can't do it direct in config.h
+ * because it'll cause a conflicting definition the first time we include
+ * netinet/in.h.
+ */
+
+#ifdef HAVE_CYGWIN
+#define IPPORT_RESERVED 0
 #endif
 
 /*
@@ -318,6 +328,28 @@ typedef unsigned int size_t;
 #define SIZE_MAX SIZE_T_MAX
 #endif
 
+#ifndef INT32_MAX
+# if (SIZEOF_INT == 4)
+#  define INT32_MAX INT_MAX
+# elif (SIZEOF_LONG == 4)
+#  define INT32_MAX LONG_MAX
+# else
+#  error "need INT32_MAX"
+# endif
+#endif
+
+#ifndef INT64_MAX
+# if (SIZEOF_INT == 8)
+#  define INT64_MAX INT_MAX
+# elif (SIZEOF_LONG == 8)
+#  define INT64_MAX LONG_MAX
+# elif (SIZEOF_LONG_LONG_INT == 8)
+#  define INT64_MAX LLONG_MAX
+# else
+#  error "need INT64_MAX"
+# endif
+#endif
+
 #ifndef HAVE_SSIZE_T
 typedef int ssize_t;
 # define HAVE_SSIZE_T
@@ -485,6 +517,13 @@ struct winsize {
 	(tv)->tv_sec = (ts)->tv_sec;					\
 	(tv)->tv_usec = (ts)->tv_nsec / 1000;				\
 }
+#endif
+
+#ifndef timespeccmp
+#define timespeccmp(tsp, usp, cmp)					\
+	(((tsp)->tv_sec == (usp)->tv_sec) ?				\
+	    ((tsp)->tv_nsec cmp (usp)->tv_nsec) :			\
+	    ((tsp)->tv_sec cmp (usp)->tv_sec))
 #endif
 
 #ifndef __P
@@ -774,6 +813,11 @@ struct winsize {
 # define CUSTOM_SYS_AUTH_PASSWD 1
 #endif
 
+#ifdef WINDOWS
+/* Windows has custom non-BSD logic for password auth */
+# define CUSTOM_SYS_AUTH_PASSWD 1
+#endif /* WINDOWS */
+
 #if defined(HAVE_LIBIAF) && defined(HAVE_SET_ID) && !defined(HAVE_SECUREWARE)
 # define CUSTOM_SYS_AUTH_PASSWD 1
 #endif
@@ -823,6 +867,13 @@ struct winsize {
 #endif
 
 /*
+ * We want functions in openbsd-compat, if enabled, to override system ones.
+ * We no-op out the weak symbol definition rather than remove it to reduce
+ * future sync problems.
+ */
+#define DEF_WEAK(x)
+
+/*
  * Platforms that have arc4random_uniform() and not arc4random_stir()
  * shouldn't need the latter.
  */
@@ -850,9 +901,11 @@ struct winsize {
 # endif /* gcc version */
 #endif /* __predict_true */
 
-/* WIN32_FIXME */
-#ifdef _WIN32
-# define CUSTOM_SYS_AUTH_PASSWD 1
+#if defined(HAVE_GLOB_H) && defined(GLOB_HAS_ALTDIRFUNC) && \
+    defined(GLOB_HAS_GL_MATCHC) && defined(GLOB_HAS_GL_STATV) && \
+    defined(HAVE_DECL_GLOB_NOMATCH) &&  HAVE_DECL_GLOB_NOMATCH != 0 && \
+    !defined(BROKEN_GLOB)
+# define USE_SYSTEM_GLOB
 #endif
 
 #endif /* _DEFINES_H */

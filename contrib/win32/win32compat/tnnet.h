@@ -35,9 +35,6 @@
  
 #ifndef __TNNET_H
 #define __TNNET_H
+void processBuffer(HANDLE handle, char *buf, size_t len, unsigned char **respbuf, size_t *resplen);
 
- int NetWriteString( char* pszString, size_t cbString);
- size_t telProcessNetwork ( char *buf, size_t len );
- 
 #endif
- 

@@ -1,4 +1,4 @@
-/* $OpenBSD: dns.c,v 1.35 2015/08/20 22:32:42 deraadt Exp $ */
+/* $OpenBSD: dns.c,v 1.37 2017/09/14 04:32:21 djm Exp $ */
 
 /*
  * Copyright (c) 2003 Wesley Griffin. All rights reserved.
@@ -204,7 +204,10 @@ int
 verify_host_key_dns(const char *hostname, struct sockaddr *address,
     struct sshkey *hostkey, int *flags)
 {
-#ifndef WIN32_FIXME
+#ifdef WINDOWS
+	error("dns host key verification is not supported in Windows yet");
+	return -1;
+#else /* !WINDOWS */
 	u_int counter;
 	int result;
 	struct rrsetinfo *fingerprints = NULL;
@@ -307,9 +310,7 @@ verify_host_key_dns(const char *hostname, struct sockaddr *address,
 		debug("no host key fingerprint found in DNS");
 
 	return 0;
-#else
-	return 0;
-#endif /* else !WIN32_FIXME */
+#endif  /* !WINDOWS */
 }
 
 /*

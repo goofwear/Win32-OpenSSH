@@ -59,7 +59,6 @@ static int	saved_egroupslen = -1, user_groupslen = -1;
 void
 temporarily_use_uid(struct passwd *pw)
 {
-#ifndef WIN32_FIXME
 	/* Save the current euid, and egroups. */
 #ifdef SAVED_IDS_WORK_WITH_SETEUID
 	saved_euid = geteuid();
@@ -130,13 +129,12 @@ temporarily_use_uid(struct passwd *pw)
 	if (seteuid(pw->pw_uid) == -1)
 		fatal("seteuid %u: %.100s", (u_int)pw->pw_uid,
 		    strerror(errno));
-#endif
 }
 
 void
 permanently_drop_suid(uid_t uid)
 {
-#ifndef HAVE_CYGWIN
+#ifndef NO_UID_RESTORATION_TEST
 	uid_t old_uid = getuid();
 #endif
 
@@ -144,8 +142,14 @@ permanently_drop_suid(uid_t uid)
 	if (setresuid(uid, uid, uid) < 0)
 		fatal("setresuid %u: %.100s", (u_int)uid, strerror(errno));
 
-#ifndef HAVE_CYGWIN
-	/* Try restoration of UID if changed (test clearing of saved uid) */
+#ifndef NO_UID_RESTORATION_TEST
+	/*
+	 * Try restoration of UID if changed (test clearing of saved uid).
+	 *
+	 * Note that we don't do this on Cygwin, or on Solaris-based platforms
+	 * where fine-grained privileges are available (the user might be
+	 * deliberately allowed the right to setuid back to root).
+	 */
 	if (old_uid != uid &&
 	    (setuid(old_uid) != -1 || seteuid(old_uid) != -1))
 		fatal("%s: was able to restore old [e]uid", __func__);
@@ -164,7 +168,6 @@ permanently_drop_suid(uid_t uid)
 void
 restore_uid(void)
 {
-#ifndef WIN32_FIXME
 	/* it's a no-op unless privileged */
 	if (!privileged) {
 		debug("restore_uid: (unprivileged)");
@@ -193,7 +196,6 @@ restore_uid(void)
 	if (setgroups(saved_egroupslen, saved_egroups) < 0)
 		fatal("setgroups: %.100s", strerror(errno));
 	temporarily_use_uid_effective = 0;
-#endif
 }
 
 /*
@@ -203,7 +205,7 @@ restore_uid(void)
 void
 permanently_set_uid(struct passwd *pw)
 {
-#ifndef HAVE_CYGWIN
+#ifndef NO_UID_RESTORATION_TEST
 	uid_t old_uid = getuid();
 	gid_t old_gid = getgid();
 #endif
@@ -231,7 +233,7 @@ permanently_set_uid(struct passwd *pw)
 	if (setresuid(pw->pw_uid, pw->pw_uid, pw->pw_uid) < 0)
 		fatal("setresuid %u: %.100s", (u_int)pw->pw_uid, strerror(errno));
 
-#ifndef HAVE_CYGWIN
+#ifndef NO_UID_RESTORATION_TEST
 	/* Try restoration of GID if changed (test clearing of saved gid) */
 	if (old_gid != pw->pw_gid && pw->pw_uid != 0 &&
 	    (setgid(old_gid) != -1 || setegid(old_gid) != -1))
@@ -245,7 +247,7 @@ permanently_set_uid(struct passwd *pw)
 		    (u_int)pw->pw_gid);
 	}
 
-#ifndef HAVE_CYGWIN
+#ifndef NO_UID_RESTORATION_TEST
 	/* Try restoration of UID if changed (test clearing of saved uid) */
 	if (old_uid != pw->pw_uid &&
 	    (setuid(old_uid) != -1 || seteuid(old_uid) != -1))

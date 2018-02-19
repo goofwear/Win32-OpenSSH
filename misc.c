@@ -1,4 +1,4 @@
-/* $OpenBSD: misc.c,v 1.97 2015/04/24 01:36:00 deraadt Exp $ */
+/* $OpenBSD: misc.c,v 1.118 2017/10/25 00:17:08 djm Exp $ */
 /*
  * Copyright (c) 2000 Markus Friedl.  All rights reserved.
  * Copyright (c) 2005,2006 Damien Miller.  All rights reserved.
@@ -29,9 +29,16 @@
 #include <sys/types.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/wait.h>
 #include <sys/un.h>
 
 #include <limits.h>
+#ifdef HAVE_LIBGEN_H
+# include <libgen.h>
+#endif
+#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -60,6 +67,10 @@
 #include "misc.h"
 #include "log.h"
 #include "ssh.h"
+#include "sshbuf.h"
+#include "ssherr.h"
+#include "uidswap.h"
+#include "platform.h"
 
 /* remove newline at end of string */
 char *
@@ -81,20 +92,11 @@ chop(char *s)
 int
 set_nonblock(int fd)
 {
-#ifdef WIN32_FIXME
-  
-  int on = 1;
-  
-  ioctlsocket(fd, FIONBIO, &on);
-  
-  return 0;
-
-#else
 	int val;
 
-	val = fcntl(fd, F_GETFL, 0);
+	val = fcntl(fd, F_GETFL);
 	if (val < 0) {
-		error("fcntl(%d, F_GETFL, 0): %s", fd, strerror(errno));
+		error("fcntl(%d, F_GETFL): %s", fd, strerror(errno));
 		return (-1);
 	}
 	if (val & O_NONBLOCK) {
@@ -109,26 +111,16 @@ set_nonblock(int fd)
 		return (-1);
 	}
 	return (0);
-#endif /* else WIN32_FIXME */
 }
 
 int
 unset_nonblock(int fd)
 {
-#ifdef WIN32_FIXME
-  
-  int on = 0;
-  
-  ioctlsocket(fd, FIONBIO, &on);
-  
-  return 0;
-  
-#else
 	int val;
 
-	val = fcntl(fd, F_GETFL, 0);
+	val = fcntl(fd, F_GETFL);
 	if (val < 0) {
-		error("fcntl(%d, F_GETFL, 0): %s", fd, strerror(errno));
+		error("fcntl(%d, F_GETFL): %s", fd, strerror(errno));
 		return (-1);
 	}
 	if (!(val & O_NONBLOCK)) {
@@ -143,7 +135,6 @@ unset_nonblock(int fd)
 		return (-1);
 	}
 	return (0);
-#endif
 }
 
 const char *
@@ -174,6 +165,73 @@ set_nodelay(int fd)
 	debug2("fd %d setting TCP_NODELAY", fd);
 	if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof opt) == -1)
 		error("setsockopt TCP_NODELAY: %.100s", strerror(errno));
+}
+
+/* Allow local port reuse in TIME_WAIT */
+int
+set_reuseaddr(int fd)
+{
+	int on = 1;
+
+	if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) == -1) {
+		error("setsockopt SO_REUSEADDR fd %d: %s", fd, strerror(errno));
+		return -1;
+	}
+	return 0;
+}
+
+/* Get/set routing domain */
+char *
+get_rdomain(int fd)
+{
+#if defined(HAVE_SYS_GET_RDOMAIN)
+	return sys_get_rdomain(fd);
+#elif defined(__OpenBSD__)
+	int rtable;
+	char *ret;
+	socklen_t len = sizeof(rtable);
+
+	if (getsockopt(fd, SOL_SOCKET, SO_RTABLE, &rtable, &len) == -1) {
+		error("Failed to get routing domain for fd %d: %s",
+		    fd, strerror(errno));
+		return NULL;
+	}
+	xasprintf(&ret, "%d", rtable);
+	return ret;
+#else /* defined(__OpenBSD__) */
+	return NULL;
+#endif
+}
+
+int
+set_rdomain(int fd, const char *name)
+{
+#if defined(HAVE_SYS_SET_RDOMAIN)
+	return sys_set_rdomain(fd, name);
+#elif defined(__OpenBSD__)
+	int rtable;
+	const char *errstr;
+
+	if (name == NULL)
+		return 0; /* default table */
+
+	rtable = (int)strtonum(name, 0, 255, &errstr);
+	if (errstr != NULL) {
+		/* Shouldn't happen */
+		error("Invalid routing domain \"%s\": %s", name, errstr);
+		return -1;
+	}
+	if (setsockopt(fd, SOL_SOCKET, SO_RTABLE,
+	    &rtable, sizeof(rtable)) == -1) {
+		error("Failed to set routing domain %d on fd %d: %s",
+		    rtable, fd, strerror(errno));
+		return -1;
+	}
+	return 0;
+#else /* defined(__OpenBSD__) */
+	error("Setting routing domain is not supported on this platform");
+	return -1;
+#endif
 }
 
 /* Characters considered whitespace in strsep calls. */
@@ -242,13 +300,12 @@ pwcopy(struct passwd *pw)
 #ifdef HAVE_STRUCT_PASSWD_PW_CLASS
 	copy->pw_class = xstrdup(pw->pw_class);
 #endif
-
-#ifdef WIN32_FIXME
-  copy -> pw_dir = _wcsdup(pw -> pw_dir);
-#else
 	copy->pw_dir = xstrdup(pw->pw_dir);
-#endif
 	copy->pw_shell = xstrdup(pw->pw_shell);
+#ifdef WINDOWS
+	copy->pw_sid = xstrdup(pw->pw_sid);
+#endif /* WINDOWS */
+
 	return copy;
 }
 
@@ -330,7 +387,7 @@ a2tun(const char *s, int *remote)
 long
 convtime(const char *s)
 {
-	long total, secs;
+	long total, secs, multiplier = 1;
 	const char *p;
 	char *endp;
 
@@ -357,23 +414,28 @@ convtime(const char *s)
 			break;
 		case 'm':
 		case 'M':
-			secs *= MINUTES;
+			multiplier = MINUTES;
 			break;
 		case 'h':
 		case 'H':
-			secs *= HOURS;
+			multiplier = HOURS;
 			break;
 		case 'd':
 		case 'D':
-			secs *= DAYS;
+			multiplier = DAYS;
 			break;
 		case 'w':
 		case 'W':
-			secs *= WEEKS;
+			multiplier = WEEKS;
 			break;
 		default:
 			return -1;
 		}
+		if (secs >= LONG_MAX / multiplier)
+			return -1;
+		secs *= multiplier;
+		if  (total >= LONG_MAX - secs)
+			return -1;
 		total += secs;
 		if (total < 0)
 			return -1;
@@ -404,11 +466,12 @@ put_host_port(const char *host, u_short port)
  * Search for next delimiter between hostnames/addresses and ports.
  * Argument may be modified (for termination).
  * Returns *cp if parsing succeeds.
- * *cp is set to the start of the next delimiter, if one was found.
+ * *cp is set to the start of the next field, if one was found.
+ * The delimiter char, if present, is stored in delim.
  * If this is the last field, *cp is set to NULL.
  */
-char *
-hpdelim(char **cp)
+static char *
+hpdelim2(char **cp, char *delim)
 {
 	char *s, *old;
 
@@ -431,6 +494,8 @@ hpdelim(char **cp)
 
 	case ':':
 	case '/':
+		if (delim != NULL)
+			*delim = *s;
 		*s = '\0';	/* terminate */
 		*cp = s + 1;
 		break;
@@ -440,6 +505,12 @@ hpdelim(char **cp)
 	}
 
 	return old;
+}
+
+char *
+hpdelim(char **cp)
+{
+	return hpdelim2(cp, NULL);
 }
 
 char *
@@ -459,6 +530,17 @@ colon(char *cp)
 
 	if (*cp == ':')		/* Leading colon is part of file name. */
 		return NULL;
+
+#ifdef WINDOWS
+	/*
+	 * Account for Windows file names in the form x: or /x: 
+	 * Note: This may conflict with potential single character targets
+	 */
+	if ((*cp != '\0' && cp[1] == ':') ||
+	    (cp[0] == '/' && cp[1] != '\0' && cp[2] == ':'))
+		return NULL;
+#endif
+
 	if (*cp == '[')
 		flag = 1;
 
@@ -473,6 +555,298 @@ colon(char *cp)
 			return NULL;
 	}
 	return NULL;
+}
+
+/*
+ * Parse a [user@]host:[path] string.
+ * Caller must free returned user, host and path.
+ * Any of the pointer return arguments may be NULL (useful for syntax checking).
+ * If user was not specified then *userp will be set to NULL.
+ * If host was not specified then *hostp will be set to NULL.
+ * If path was not specified then *pathp will be set to ".".
+ * Returns 0 on success, -1 on failure.
+ */
+int
+parse_user_host_path(const char *s, char **userp, char **hostp, char **pathp)
+{
+	char *user = NULL, *host = NULL, *path = NULL;
+	char *sdup, *tmp;
+	int ret = -1;
+
+	if (userp != NULL)
+		*userp = NULL;
+	if (hostp != NULL)
+		*hostp = NULL;
+	if (pathp != NULL)
+		*pathp = NULL;
+
+	sdup = xstrdup(s);
+
+	/* Check for remote syntax: [user@]host:[path] */
+	if ((tmp = colon(sdup)) == NULL)
+		goto out;
+
+	/* Extract optional path */
+	*tmp++ = '\0';
+	if (*tmp == '\0')
+		tmp = ".";
+	path = xstrdup(tmp);
+
+	/* Extract optional user and mandatory host */
+	tmp = strrchr(sdup, '@');
+	if (tmp != NULL) {
+		*tmp++ = '\0';
+		host = xstrdup(cleanhostname(tmp));
+		if (*sdup != '\0')
+			user = xstrdup(sdup);
+	} else {
+		host = xstrdup(cleanhostname(sdup));
+		user = NULL;
+	}
+
+	/* Success */
+	if (userp != NULL) {
+		*userp = user;
+		user = NULL;
+	}
+	if (hostp != NULL) {
+		*hostp = host;
+		host = NULL;
+	}
+	if (pathp != NULL) {
+		*pathp = path;
+		path = NULL;
+	}
+	ret = 0;
+out:
+	free(sdup);
+	free(user);
+	free(host);
+	free(path);
+	return ret;
+}
+
+/*
+ * Parse a [user@]host[:port] string.
+ * Caller must free returned user and host.
+ * Any of the pointer return arguments may be NULL (useful for syntax checking).
+ * If user was not specified then *userp will be set to NULL.
+ * If port was not specified then *portp will be -1.
+ * Returns 0 on success, -1 on failure.
+ */
+int
+parse_user_host_port(const char *s, char **userp, char **hostp, int *portp)
+{
+	char *sdup, *cp, *tmp;
+	char *user = NULL, *host = NULL;
+	int port = -1, ret = -1;
+
+	if (userp != NULL)
+		*userp = NULL;
+	if (hostp != NULL)
+		*hostp = NULL;
+	if (portp != NULL)
+		*portp = -1;
+
+	if ((sdup = tmp = strdup(s)) == NULL)
+		return -1;
+	/* Extract optional username */
+	if ((cp = strrchr(tmp, '@')) != NULL) {
+		*cp = '\0';
+		if (*tmp == '\0')
+			goto out;
+		if ((user = strdup(tmp)) == NULL)
+			goto out;
+		tmp = cp + 1;
+	}
+	/* Extract mandatory hostname */
+	if ((cp = hpdelim(&tmp)) == NULL || *cp == '\0')
+		goto out;
+	host = xstrdup(cleanhostname(cp));
+	/* Convert and verify optional port */
+	if (tmp != NULL && *tmp != '\0') {
+		if ((port = a2port(tmp)) <= 0)
+			goto out;
+	}
+	/* Success */
+	if (userp != NULL) {
+		*userp = user;
+		user = NULL;
+	}
+	if (hostp != NULL) {
+		*hostp = host;
+		host = NULL;
+	}
+	if (portp != NULL)
+		*portp = port;
+	ret = 0;
+ out:
+	free(sdup);
+	free(user);
+	free(host);
+	return ret;
+}
+
+/*
+ * Converts a two-byte hex string to decimal.
+ * Returns the decimal value or -1 for invalid input.
+ */
+static int
+hexchar(const char *s)
+{
+	unsigned char result[2];
+	int i;
+
+	for (i = 0; i < 2; i++) {
+		if (s[i] >= '0' && s[i] <= '9')
+			result[i] = (unsigned char)(s[i] - '0');
+		else if (s[i] >= 'a' && s[i] <= 'f')
+			result[i] = (unsigned char)(s[i] - 'a') + 10;
+		else if (s[i] >= 'A' && s[i] <= 'F')
+			result[i] = (unsigned char)(s[i] - 'A') + 10;
+		else
+			return -1;
+	}
+	return (result[0] << 4) | result[1];
+}
+
+/*
+ * Decode an url-encoded string.
+ * Returns a newly allocated string on success or NULL on failure.
+ */
+static char *
+urldecode(const char *src)
+{
+	char *ret, *dst;
+	int ch;
+
+	ret = xmalloc(strlen(src) + 1);
+	for (dst = ret; *src != '\0'; src++) {
+		switch (*src) {
+		case '+':
+			*dst++ = ' ';
+			break;
+		case '%':
+			if (!isxdigit((unsigned char)src[1]) ||
+			    !isxdigit((unsigned char)src[2]) ||
+			    (ch = hexchar(src + 1)) == -1) {
+				free(ret);
+				return NULL;
+			}
+			*dst++ = ch;
+			src += 2;
+			break;
+		default:
+			*dst++ = *src;
+			break;
+		}
+	}
+	*dst = '\0';
+
+	return ret;
+}
+
+/*
+ * Parse an (scp|ssh|sftp)://[user@]host[:port][/path] URI.
+ * See https://tools.ietf.org/html/draft-ietf-secsh-scp-sftp-ssh-uri-04
+ * Either user or path may be url-encoded (but not host or port).
+ * Caller must free returned user, host and path.
+ * Any of the pointer return arguments may be NULL (useful for syntax checking)
+ * but the scheme must always be specified.
+ * If user was not specified then *userp will be set to NULL.
+ * If port was not specified then *portp will be -1.
+ * If path was not specified then *pathp will be set to NULL.
+ * Returns 0 on success, 1 if non-uri/wrong scheme, -1 on error/invalid uri.
+ */
+int
+parse_uri(const char *scheme, const char *uri, char **userp, char **hostp,
+    int *portp, char **pathp)
+{
+	char *uridup, *cp, *tmp, ch;
+	char *user = NULL, *host = NULL, *path = NULL;
+	int port = -1, ret = -1;
+	size_t len;
+
+	len = strlen(scheme);
+	if (strncmp(uri, scheme, len) != 0 || strncmp(uri + len, "://", 3) != 0)
+		return 1;
+	uri += len + 3;
+
+	if (userp != NULL)
+		*userp = NULL;
+	if (hostp != NULL)
+		*hostp = NULL;
+	if (portp != NULL)
+		*portp = -1;
+	if (pathp != NULL)
+		*pathp = NULL;
+
+	uridup = tmp = xstrdup(uri);
+
+	/* Extract optional ssh-info (username + connection params) */
+	if ((cp = strchr(tmp, '@')) != NULL) {
+		char *delim;
+
+		*cp = '\0';
+		/* Extract username and connection params */
+		if ((delim = strchr(tmp, ';')) != NULL) {
+			/* Just ignore connection params for now */
+			*delim = '\0';
+		}
+		if (*tmp == '\0') {
+			/* Empty username */
+			goto out;
+		}
+		if ((user = urldecode(tmp)) == NULL)
+			goto out;
+		tmp = cp + 1;
+	}
+
+	/* Extract mandatory hostname */
+	if ((cp = hpdelim2(&tmp, &ch)) == NULL || *cp == '\0')
+		goto out;
+	host = xstrdup(cleanhostname(cp));
+	if (!valid_domain(host, 0, NULL))
+		goto out;
+
+	if (tmp != NULL && *tmp != '\0') {
+		if (ch == ':') {
+			/* Convert and verify port. */
+			if ((cp = strchr(tmp, '/')) != NULL)
+				*cp = '\0';
+			if ((port = a2port(tmp)) <= 0)
+				goto out;
+			tmp = cp ? cp + 1 : NULL;
+		}
+		if (tmp != NULL && *tmp != '\0') {
+			/* Extract optional path */
+			if ((path = urldecode(tmp)) == NULL)
+				goto out;
+		}
+	}
+
+	/* Success */
+	if (userp != NULL) {
+		*userp = user;
+		user = NULL;
+	}
+	if (hostp != NULL) {
+		*hostp = host;
+		host = NULL;
+	}
+	if (portp != NULL)
+		*portp = port;
+	if (pathp != NULL) {
+		*pathp = path;
+		path = NULL;
+	}
+	ret = 0;
+ out:
+	free(uridup);
+	free(user);
+	free(host);
+	free(path);
+	return ret;
 }
 
 /* function to assist building execv() arguments */
@@ -497,7 +871,7 @@ addargs(arglist *args, char *fmt, ...)
 	} else if (args->num+2 >= nalloc)
 		nalloc *= 2;
 
-	args->list = xreallocarray(args->list, nalloc, sizeof(char *));
+	args->list = xrecallocarray(args->list, args->nalloc, nalloc, sizeof(char *));
 	args->nalloc = nalloc;
 	args->list[args->num++] = cp;
 	args->list[args->num] = NULL;
@@ -545,11 +919,7 @@ char *
 tilde_expand_filename(const char *filename, uid_t uid)
 {
 	const char *path, *sep;
-#ifdef WIN32_FIXME
-	char user[128], ret[MAXPATHLEN], *ret2;
-#else
 	char user[128], *ret;
-#endif
 	struct passwd *pw;
 	u_int len, slash;
 
@@ -569,44 +939,21 @@ tilde_expand_filename(const char *filename, uid_t uid)
 	} else if ((pw = getpwuid(uid)) == NULL)	/* ~/path */
 		fatal("tilde_expand_filename: No such uid %ld", (long)uid);
 
-#ifdef WIN32_FIXME
-
-  //
-  // Catch case when, homedir is unknown or doesn't exist
-  // e.g. for SYSTEM user. Then, redirect path to NUL.
-  //
-
-  if (wcslen(pw -> pw_dir) == 0)
-  {
-    snprintf(ret, sizeof(ret), "NUL");
-  }
-
-  else if (snprintf(ret, sizeof(ret), "%ls", pw -> pw_dir) <= 0)
-#endif
 	/* Make sure directory has a trailing '/' */
-#ifndef WIN32_FIXME
 	len = strlen(pw->pw_dir);
 	if (len == 0 || pw->pw_dir[len - 1] != '/')
 		sep = "/";
 	else
 		sep = "";
-#endif
 
 	/* Skip leading '/' from specified path */
 	if (path != NULL)
 		filename = path + 1;
 
-#ifndef WIN32_FIXME
 	if (xasprintf(&ret, "%s%s%s", pw->pw_dir, sep, filename) >= PATH_MAX)
-#else
-	if (xasprintf(&ret2, "%s%s", ret, filename) >= PATH_MAX)
-#endif
 		fatal("tilde_expand_filename: Path too long");
-#ifdef WIN32_FIXME
-	return (ret2);
-#else
+
 	return (ret);
-#endif
 }
 
 /*
@@ -656,6 +1003,8 @@ percent_expand(const char *string, ...)
 		/* %% case */
 		if (*string == '%')
 			goto append;
+		if (*string == '\0')
+			fatal("%s: invalid format", __func__);
 		for (j = 0; j < num_keys; j++) {
 			if (strchr(keys[j].key, *string) != NULL) {
 				i = strlcat(buf, keys[j].repl, sizeof(buf));
@@ -671,63 +1020,6 @@ percent_expand(const char *string, ...)
 #undef EXPAND_MAX_KEYS
 }
 
-#ifdef WIN32_FIXME
-wchar_t    *percent_expand_w(const wchar_t *string, ...)
-{
-#define EXPAND_MAX_KEYS 16
-        u_int num_keys, i, j;
-        struct {
-                const wchar_t *key;
-                const wchar_t *repl;
-        } keys[EXPAND_MAX_KEYS];
-        wchar_t buf[4096];
-        va_list ap;
-
-        /* Gather keys */
-        va_start(ap, string);
-        for (num_keys = 0; num_keys < EXPAND_MAX_KEYS; num_keys++) {
-                keys[num_keys].key = va_arg(ap, wchar_t *);
-                if (keys[num_keys].key == NULL)
-                        break;
-                keys[num_keys].repl = va_arg(ap, wchar_t *);
-                if (keys[num_keys].repl == NULL)
-                        fatal("%s: NULL replacement", __func__);
-        }
-        if (num_keys == EXPAND_MAX_KEYS && va_arg(ap, wchar_t *) != NULL)
-                fatal("%s: too many keys", __func__);
-        va_end(ap);
-
-        /* Expand string */
-        *buf = L'\0';
-        for (i = 0; *string != L'\0'; string++) {
-                if (*string != L'%') {
- append:
-                        buf[i++] = *string;
-                        if (i >= sizeof(buf))
-                                fatal("%s: string too long", __func__);
-                        buf[i] = L'\0';
-                        continue;
-                }
-                string++;
-                /* %% case */
-                if (*string == L'%')
-                        goto append;
-                for (j = 0; j < num_keys; j++) {
-                        if (wcschr(keys[j].key, *string) != NULL) {
-                                i = wcsncat(buf, keys[j].repl, sizeof(buf));
-                                buf[sizeof(buf)-1] = 0;
-                                if (i >= sizeof(buf))
-                                        fatal("%s: string too long", __func__);
-                                break;
-                        }
-                }
-                if (j >= num_keys)
-                        fatal("%s: unknown key %%%c", __func__, *string);
-        }
-        return (_wcsdup(buf));
-#undef EXPAND_MAX_KEYS
-}
-#endif
 /*
  * Read an entire line from a public key file into a static buffer, discarding
  * lines that exceed the buffer size.  Returns 0 on success, -1 on failure.
@@ -754,70 +1046,77 @@ read_keyfile_line(FILE *f, const char *filename, char *buf, size_t bufsz,
 }
 
 int
-tun_open(int tun, int mode)
+tun_open(int tun, int mode, char **ifname)
 {
 #if defined(CUSTOM_SYS_TUN_OPEN)
-	return (sys_tun_open(tun, mode));
+	return (sys_tun_open(tun, mode, ifname));
 #elif defined(SSH_TUN_OPENBSD)
 	struct ifreq ifr;
 	char name[100];
 	int fd = -1, sock;
+	const char *tunbase = "tun";
+
+	if (ifname != NULL)
+		*ifname = NULL;
+
+	if (mode == SSH_TUNMODE_ETHERNET)
+		tunbase = "tap";
 
 	/* Open the tunnel device */
 	if (tun <= SSH_TUNID_MAX) {
-		snprintf(name, sizeof(name), "/dev/tun%d", tun);
+		snprintf(name, sizeof(name), "/dev/%s%d", tunbase, tun);
 		fd = open(name, O_RDWR);
 	} else if (tun == SSH_TUNID_ANY) {
 		for (tun = 100; tun >= 0; tun--) {
-			snprintf(name, sizeof(name), "/dev/tun%d", tun);
+			snprintf(name, sizeof(name), "/dev/%s%d",
+			    tunbase, tun);
 			if ((fd = open(name, O_RDWR)) >= 0)
 				break;
 		}
 	} else {
 		debug("%s: invalid tunnel %u", __func__, tun);
-		return (-1);
+		return -1;
 	}
 
 	if (fd < 0) {
-		debug("%s: %s open failed: %s", __func__, name, strerror(errno));
-		return (-1);
+		debug("%s: %s open: %s", __func__, name, strerror(errno));
+		return -1;
 	}
 
 	debug("%s: %s mode %d fd %d", __func__, name, mode, fd);
 
-	/* Set the tunnel device operation mode */
-	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "tun%d", tun);
+	/* Bring interface up if it is not already */
+	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s%d", tunbase, tun);
 	if ((sock = socket(PF_UNIX, SOCK_STREAM, 0)) == -1)
 		goto failed;
 
-	if (ioctl(sock, SIOCGIFFLAGS, &ifr) == -1)
+	if (ioctl(sock, SIOCGIFFLAGS, &ifr) == -1) {
+		debug("%s: get interface %s flags: %s", __func__,
+		    ifr.ifr_name, strerror(errno));
 		goto failed;
+	}
 
-	/* Set interface mode */
-	ifr.ifr_flags &= ~IFF_UP;
-	if (mode == SSH_TUNMODE_ETHERNET)
-		ifr.ifr_flags |= IFF_LINK0;
-	else
-		ifr.ifr_flags &= ~IFF_LINK0;
-	if (ioctl(sock, SIOCSIFFLAGS, &ifr) == -1)
-		goto failed;
+	if (!(ifr.ifr_flags & IFF_UP)) {
+		ifr.ifr_flags |= IFF_UP;
+		if (ioctl(sock, SIOCSIFFLAGS, &ifr) == -1) {
+			debug("%s: activate interface %s: %s", __func__,
+			    ifr.ifr_name, strerror(errno));
+			goto failed;
+		}
+	}
 
-	/* Bring interface up */
-	ifr.ifr_flags |= IFF_UP;
-	if (ioctl(sock, SIOCSIFFLAGS, &ifr) == -1)
-		goto failed;
+	if (ifname != NULL)
+		*ifname = xstrdup(ifr.ifr_name);
 
 	close(sock);
-	return (fd);
+	return fd;
 
  failed:
 	if (fd >= 0)
 		close(fd);
 	if (sock >= 0)
 		close(sock);
-	debug("%s: failed to set %s mode %d: %s", __func__, name,
-	    mode, strerror(errno));
-	return (-1);
+	return -1;
 #else
 	error("Tunnel interfaces are not supported on this platform");
 	return (-1);
@@ -827,7 +1126,6 @@ tun_open(int tun, int mode)
 void
 sanitise_stdfd(void)
 {
-#ifndef WIN32_FIXME
 	int nullfd, dupfd;
 
 	if ((nullfd = dupfd = open(_PATH_DEVNULL, O_RDWR)) == -1) {
@@ -835,18 +1133,17 @@ sanitise_stdfd(void)
 		    strerror(errno));
 		exit(1);
 	}
-	while (++dupfd <= 2) {
-		/* Only clobber closed fds */
-		if (fcntl(dupfd, F_GETFL, 0) >= 0)
-			continue;
-		if (dup2(nullfd, dupfd) == -1) {
-			fprintf(stderr, "dup2: %s\n", strerror(errno));
-			exit(1);
+	while (++dupfd <= STDERR_FILENO) {
+		/* Only populate closed fds. */
+		if (fcntl(dupfd, F_GETFL) == -1 && errno == EBADF) {
+			if (dup2(nullfd, dupfd) == -1) {
+				fprintf(stderr, "dup2: %s\n", strerror(errno));
+				exit(1);
+			}
 		}
 	}
-	if (nullfd > 2)
+	if (nullfd > STDERR_FILENO)
 		close(nullfd);
-#endif
 }
 
 char *
@@ -1016,6 +1313,31 @@ monotime(void)
 	return time(NULL);
 }
 
+double
+monotime_double(void)
+{
+#if defined(HAVE_CLOCK_GETTIME) && \
+    (defined(CLOCK_MONOTONIC) || defined(CLOCK_BOOTTIME))
+	struct timespec ts;
+	static int gettime_failed = 0;
+
+	if (!gettime_failed) {
+#if defined(CLOCK_BOOTTIME)
+		if (clock_gettime(CLOCK_BOOTTIME, &ts) == 0)
+			return (ts.tv_sec + (double)ts.tv_nsec / 1000000000);
+#endif
+#if defined(CLOCK_MONOTONIC)
+		if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+			return (ts.tv_sec + (double)ts.tv_nsec / 1000000000);
+#endif
+		debug3("clock_gettime: %s", strerror(errno));
+		gettime_failed = 1;
+	}
+#endif /* HAVE_CLOCK_GETTIME && (CLOCK_MONOTONIC || CLOCK_BOOTTIME */
+
+	return (double)time(NULL);
+}
+
 void
 bandwidth_limit_init(struct bwlimit *bw, u_int64_t kbps, size_t buflen)
 {
@@ -1031,7 +1353,6 @@ bandwidth_limit_init(struct bwlimit *bw, u_int64_t kbps, size_t buflen)
 void
 bandwidth_limit(struct bwlimit *bw, size_t read_len)
 {
-#ifndef WIN32_FIXME
 	u_int64_t waitlen;
 	struct timespec ts, rm;
 
@@ -1079,7 +1400,6 @@ bandwidth_limit(struct bwlimit *bw, size_t read_len)
 
 	bw->lamt = 0;
 	gettimeofday(&bw->bwstart, NULL);
-#endif
 }
 
 /* Make a template filename for mk[sd]temp() */
@@ -1103,6 +1423,7 @@ static const struct {
 	const char *name;
 	int value;
 } ipqos[] = {
+	{ "none", INT_MAX },		/* can't use 0 here; that's CS0 */
 	{ "af11", IPTOS_DSCP_AF11 },
 	{ "af12", IPTOS_DSCP_AF12 },
 	{ "af13", IPTOS_DSCP_AF13 },
@@ -1220,11 +1541,593 @@ unix_listener(const char *path, int backlog, int unlink_first)
 void
 sock_set_v6only(int s)
 {
-#ifdef IPV6_V6ONLY
+#if defined(IPV6_V6ONLY) && !defined(__OpenBSD__)
 	int on = 1;
 
 	debug3("%s: set socket %d IPV6_V6ONLY", __func__, s);
 	if (setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, &on, sizeof(on)) == -1)
 		error("setsockopt IPV6_V6ONLY: %s", strerror(errno));
 #endif
+}
+
+/*
+ * Compares two strings that maybe be NULL. Returns non-zero if strings
+ * are both NULL or are identical, returns zero otherwise.
+ */
+static int
+strcmp_maybe_null(const char *a, const char *b)
+{
+	if ((a == NULL && b != NULL) || (a != NULL && b == NULL))
+		return 0;
+	if (a != NULL && strcmp(a, b) != 0)
+		return 0;
+	return 1;
+}
+
+/*
+ * Compare two forwards, returning non-zero if they are identical or
+ * zero otherwise.
+ */
+int
+forward_equals(const struct Forward *a, const struct Forward *b)
+{
+	if (strcmp_maybe_null(a->listen_host, b->listen_host) == 0)
+		return 0;
+	if (a->listen_port != b->listen_port)
+		return 0;
+	if (strcmp_maybe_null(a->listen_path, b->listen_path) == 0)
+		return 0;
+	if (strcmp_maybe_null(a->connect_host, b->connect_host) == 0)
+		return 0;
+	if (a->connect_port != b->connect_port)
+		return 0;
+	if (strcmp_maybe_null(a->connect_path, b->connect_path) == 0)
+		return 0;
+	/* allocated_port and handle are not checked */
+	return 1;
+}
+
+/* returns 1 if bind to specified port by specified user is permitted */
+int
+bind_permitted(int port, uid_t uid)
+{
+	if (port < IPPORT_RESERVED && uid != 0)
+		return 0;
+	return 1;
+}
+
+/* returns 1 if process is already daemonized, 0 otherwise */
+#ifdef WINDOWS
+/* This should go away once sshd platform specific startup code is refactored */
+int 
+daemonized(void)
+{
+	return 1;
+}
+#else /* !WINDOWS */
+int
+daemonized(void)
+{
+	int fd;
+
+	if ((fd = open(_PATH_TTY, O_RDONLY | O_NOCTTY)) >= 0) {
+		close(fd);
+		return 0;	/* have controlling terminal */
+	}
+	if (getppid() != 1)
+		return 0;	/* parent is not init */
+	if (getsid(0) != getpid())
+		return 0;	/* not session leader */
+	debug3("already daemonized");
+	return 1;
+}
+#endif /* !WINDOWS */
+
+/*
+ * Splits 's' into an argument vector. Handles quoted string and basic
+ * escape characters (\\, \", \'). Caller must free the argument vector
+ * and its members.
+ */
+int
+argv_split(const char *s, int *argcp, char ***argvp)
+{
+	int r = SSH_ERR_INTERNAL_ERROR;
+	int argc = 0, quote, i, j;
+	char *arg, **argv = xcalloc(1, sizeof(*argv));
+
+	*argvp = NULL;
+	*argcp = 0;
+
+	for (i = 0; s[i] != '\0'; i++) {
+		/* Skip leading whitespace */
+		if (s[i] == ' ' || s[i] == '\t')
+			continue;
+
+		/* Start of a token */
+		quote = 0;
+		if (s[i] == '\\' &&
+		    (s[i + 1] == '\'' || s[i + 1] == '\"' || s[i + 1] == '\\'))
+			i++;
+		else if (s[i] == '\'' || s[i] == '"')
+			quote = s[i++];
+
+		argv = xreallocarray(argv, (argc + 2), sizeof(*argv));
+		arg = argv[argc++] = xcalloc(1, strlen(s + i) + 1);
+		argv[argc] = NULL;
+
+		/* Copy the token in, removing escapes */
+		for (j = 0; s[i] != '\0'; i++) {
+			if (s[i] == '\\') {
+				if (s[i + 1] == '\'' ||
+				    s[i + 1] == '\"' ||
+				    s[i + 1] == '\\') {
+					i++; /* Skip '\' */
+					arg[j++] = s[i];
+				} else {
+					/* Unrecognised escape */
+					arg[j++] = s[i];
+				}
+			} else if (quote == 0 && (s[i] == ' ' || s[i] == '\t'))
+				break; /* done */
+			else if (quote != 0 && s[i] == quote)
+				break; /* done */
+			else
+				arg[j++] = s[i];
+		}
+		if (s[i] == '\0') {
+			if (quote != 0) {
+				/* Ran out of string looking for close quote */
+				r = SSH_ERR_INVALID_FORMAT;
+				goto out;
+			}
+			break;
+		}
+	}
+	/* Success */
+	*argcp = argc;
+	*argvp = argv;
+	argc = 0;
+	argv = NULL;
+	r = 0;
+ out:
+	if (argc != 0 && argv != NULL) {
+		for (i = 0; i < argc; i++)
+			free(argv[i]);
+		free(argv);
+	}
+	return r;
+}
+
+/*
+ * Reassemble an argument vector into a string, quoting and escaping as
+ * necessary. Caller must free returned string.
+ */
+char *
+argv_assemble(int argc, char **argv)
+{
+	int i, j, ws, r;
+	char c, *ret;
+	struct sshbuf *buf, *arg;
+
+	if ((buf = sshbuf_new()) == NULL || (arg = sshbuf_new()) == NULL)
+		fatal("%s: sshbuf_new failed", __func__);
+
+	for (i = 0; i < argc; i++) {
+		ws = 0;
+		sshbuf_reset(arg);
+		for (j = 0; argv[i][j] != '\0'; j++) {
+			r = 0;
+			c = argv[i][j];
+			switch (c) {
+			case ' ':
+			case '\t':
+				ws = 1;
+				r = sshbuf_put_u8(arg, c);
+				break;
+			case '\\':
+			case '\'':
+			case '"':
+				if ((r = sshbuf_put_u8(arg, '\\')) != 0)
+					break;
+				/* FALLTHROUGH */
+			default:
+				r = sshbuf_put_u8(arg, c);
+				break;
+			}
+			if (r != 0)
+				fatal("%s: sshbuf_put_u8: %s",
+				    __func__, ssh_err(r));
+		}
+		if ((i != 0 && (r = sshbuf_put_u8(buf, ' ')) != 0) ||
+		    (ws != 0 && (r = sshbuf_put_u8(buf, '"')) != 0) ||
+		    (r = sshbuf_putb(buf, arg)) != 0 ||
+		    (ws != 0 && (r = sshbuf_put_u8(buf, '"')) != 0))
+			fatal("%s: buffer error: %s", __func__, ssh_err(r));
+	}
+	if ((ret = malloc(sshbuf_len(buf) + 1)) == NULL)
+		fatal("%s: malloc failed", __func__);
+	memcpy(ret, sshbuf_ptr(buf), sshbuf_len(buf));
+	ret[sshbuf_len(buf)] = '\0';
+	sshbuf_free(buf);
+	sshbuf_free(arg);
+	return ret;
+}
+
+/*
+ * Runs command in a subprocess wuth a minimal environment.
+ * Returns pid on success, 0 on failure.
+ * The child stdout and stderr maybe captured, left attached or sent to
+ * /dev/null depending on the contents of flags.
+ * "tag" is prepended to log messages.
+ * NB. "command" is only used for logging; the actual command executed is
+ * av[0].
+ */
+pid_t
+subprocess(const char *tag, struct passwd *pw, const char *command,
+    int ac, char **av, FILE **child, u_int flags)
+{
+#ifdef WINDOWS
+	error("subprocess is not implemented in Windows yet");
+	return 0;
+#else
+	FILE *f = NULL;
+	struct stat st;
+	int fd, devnull, p[2], i;
+	pid_t pid;
+	char *cp, errmsg[512];
+	u_int envsize;
+	char **child_env;
+
+	if (child != NULL)
+		*child = NULL;
+
+	debug3("%s: %s command \"%s\" running as %s (flags 0x%x)", __func__,
+	    tag, command, pw->pw_name, flags);
+
+	/* Check consistency */
+	if ((flags & SSH_SUBPROCESS_STDOUT_DISCARD) != 0 &&
+	    (flags & SSH_SUBPROCESS_STDOUT_CAPTURE) != 0) {
+		error("%s: inconsistent flags", __func__);
+		return 0;
+	}
+	if (((flags & SSH_SUBPROCESS_STDOUT_CAPTURE) == 0) != (child == NULL)) {
+		error("%s: inconsistent flags/output", __func__);
+		return 0;
+	}
+
+	/*
+	 * If executing an explicit binary, then verify the it exists
+	 * and appears safe-ish to execute
+	 */
+	if (*av[0] != '/') {
+		error("%s path is not absolute", tag);
+		return 0;
+	}
+	temporarily_use_uid(pw);
+	if (stat(av[0], &st) < 0) {
+		error("Could not stat %s \"%s\": %s", tag,
+		    av[0], strerror(errno));
+		restore_uid();
+		return 0;
+	}
+	if (safe_path(av[0], &st, NULL, 0, errmsg, sizeof(errmsg)) != 0) {
+		error("Unsafe %s \"%s\": %s", tag, av[0], errmsg);
+		restore_uid();
+		return 0;
+	}
+	/* Prepare to keep the child's stdout if requested */
+	if (pipe(p) != 0) {
+		error("%s: pipe: %s", tag, strerror(errno));
+		restore_uid();
+		return 0;
+	}
+	restore_uid();
+
+	switch ((pid = fork())) {
+	case -1: /* error */
+		error("%s: fork: %s", tag, strerror(errno));
+		close(p[0]);
+		close(p[1]);
+		return 0;
+	case 0: /* child */
+		/* Prepare a minimal environment for the child. */
+		envsize = 5;
+		child_env = xcalloc(sizeof(*child_env), envsize);
+		child_set_env(&child_env, &envsize, "PATH", _PATH_STDPATH);
+		child_set_env(&child_env, &envsize, "USER", pw->pw_name);
+		child_set_env(&child_env, &envsize, "LOGNAME", pw->pw_name);
+		child_set_env(&child_env, &envsize, "HOME", pw->pw_dir);
+		if ((cp = getenv("LANG")) != NULL)
+			child_set_env(&child_env, &envsize, "LANG", cp);
+
+		for (i = 0; i < NSIG; i++)
+			signal(i, SIG_DFL);
+
+		if ((devnull = open(_PATH_DEVNULL, O_RDWR)) == -1) {
+			error("%s: open %s: %s", tag, _PATH_DEVNULL,
+			    strerror(errno));
+			_exit(1);
+		}
+		if (dup2(devnull, STDIN_FILENO) == -1) {
+			error("%s: dup2: %s", tag, strerror(errno));
+			_exit(1);
+		}
+
+		/* Set up stdout as requested; leave stderr in place for now. */
+		fd = -1;
+		if ((flags & SSH_SUBPROCESS_STDOUT_CAPTURE) != 0)
+			fd = p[1];
+		else if ((flags & SSH_SUBPROCESS_STDOUT_DISCARD) != 0)
+			fd = devnull;
+		if (fd != -1 && dup2(fd, STDOUT_FILENO) == -1) {
+			error("%s: dup2: %s", tag, strerror(errno));
+			_exit(1);
+		}
+		closefrom(STDERR_FILENO + 1);
+
+		/* Don't use permanently_set_uid() here to avoid fatal() */
+		if (setresgid(pw->pw_gid, pw->pw_gid, pw->pw_gid) != 0) {
+			error("%s: setresgid %u: %s", tag, (u_int)pw->pw_gid,
+			    strerror(errno));
+			_exit(1);
+		}
+		if (setresuid(pw->pw_uid, pw->pw_uid, pw->pw_uid) != 0) {
+			error("%s: setresuid %u: %s", tag, (u_int)pw->pw_uid,
+			    strerror(errno));
+			_exit(1);
+		}
+		/* stdin is pointed to /dev/null at this point */
+		if ((flags & SSH_SUBPROCESS_STDOUT_DISCARD) != 0 &&
+		    dup2(STDIN_FILENO, STDERR_FILENO) == -1) {
+			error("%s: dup2: %s", tag, strerror(errno));
+			_exit(1);
+		}
+
+		execve(av[0], av, child_env);
+		error("%s exec \"%s\": %s", tag, command, strerror(errno));
+		_exit(127);
+	default: /* parent */
+		break;
+	}
+
+	close(p[1]);
+	if ((flags & SSH_SUBPROCESS_STDOUT_CAPTURE) == 0)
+		close(p[0]);
+	else if ((f = fdopen(p[0], "r")) == NULL) {
+		error("%s: fdopen: %s", tag, strerror(errno));
+		close(p[0]);
+		/* Don't leave zombie child */
+		kill(pid, SIGTERM);
+		while (waitpid(pid, NULL, 0) == -1 && errno == EINTR)
+			;
+		return 0;
+	}
+	/* Success */
+	debug3("%s: %s pid %ld", __func__, tag, (long)pid);
+	if (child != NULL)
+		*child = f;
+	return pid;
+#endif
+}
+
+/* Returns 0 if pid exited cleanly, non-zero otherwise */
+int
+exited_cleanly(pid_t pid, const char *tag, const char *cmd, int quiet)
+{
+	int status;
+
+	while (waitpid(pid, &status, 0) == -1) {
+		if (errno != EINTR) {
+			error("%s: waitpid: %s", tag, strerror(errno));
+			return -1;
+		}
+	}
+	if (WIFSIGNALED(status)) {
+		error("%s %s exited on signal %d", tag, cmd, WTERMSIG(status));
+		return -1;
+	} else if (WEXITSTATUS(status) != 0) {
+		do_log2(quiet ? SYSLOG_LEVEL_DEBUG1 : SYSLOG_LEVEL_INFO,
+		    "%s %s failed, status %d", tag, cmd, WEXITSTATUS(status));
+		return -1;
+	}
+	return 0;
+}
+
+/*
+ * Check a given path for security. This is defined as all components
+ * of the path to the file must be owned by either the owner of
+ * of the file or root and no directories must be group or world writable.
+ *
+ * XXX Should any specific check be done for sym links ?
+ *
+ * Takes a file name, its stat information (preferably from fstat() to
+ * avoid races), the uid of the expected owner, their home directory and an
+ * error buffer plus max size as arguments.
+ *
+ * Returns 0 on success and -1 on failure
+ */
+int
+safe_path(const char *name, struct stat *stp, const char *pw_dir,
+    uid_t uid, char *err, size_t errlen)
+{
+	char buf[PATH_MAX], homedir[PATH_MAX];
+	char *cp;
+	int comparehome = 0;
+	struct stat st;
+
+	if (realpath(name, buf) == NULL) {
+		snprintf(err, errlen, "realpath %s failed: %s", name,
+		    strerror(errno));
+		return -1;
+	}
+	if (pw_dir != NULL && realpath(pw_dir, homedir) != NULL)
+		comparehome = 1;
+
+	if (!S_ISREG(stp->st_mode)) {
+		snprintf(err, errlen, "%s is not a regular file", buf);
+		return -1;
+	}
+	if ((!platform_sys_dir_uid(stp->st_uid) && stp->st_uid != uid) ||
+	    (stp->st_mode & 022) != 0) {
+		snprintf(err, errlen, "bad ownership or modes for file %s",
+		    buf);
+		return -1;
+	}
+
+	/* for each component of the canonical path, walking upwards */
+	for (;;) {
+		if ((cp = dirname(buf)) == NULL) {
+			snprintf(err, errlen, "dirname() failed");
+			return -1;
+		}
+		strlcpy(buf, cp, sizeof(buf));
+
+		if (stat(buf, &st) < 0 ||
+		    (!platform_sys_dir_uid(st.st_uid) && st.st_uid != uid) ||
+		    (st.st_mode & 022) != 0) {
+			snprintf(err, errlen,
+			    "bad ownership or modes for directory %s", buf);
+			return -1;
+		}
+
+		/* If are past the homedir then we can stop */
+		if (comparehome && strcmp(homedir, buf) == 0)
+			break;
+
+		/*
+		 * dirname should always complete with a "/" path,
+		 * but we can be paranoid and check for "." too
+		 */
+		if ((strcmp("/", buf) == 0) || (strcmp(".", buf) == 0))
+			break;
+	}
+	return 0;
+}
+
+/*
+ * Version of safe_path() that accepts an open file descriptor to
+ * avoid races.
+ *
+ * Returns 0 on success and -1 on failure
+ */
+int
+safe_path_fd(int fd, const char *file, struct passwd *pw,
+    char *err, size_t errlen)
+{
+	struct stat st;
+
+	/* check the open file to avoid races */
+	if (fstat(fd, &st) < 0) {
+		snprintf(err, errlen, "cannot stat file %s: %s",
+		    file, strerror(errno));
+		return -1;
+	}
+	return safe_path(file, &st, pw->pw_dir, pw->pw_uid, err, errlen);
+}
+
+/*
+ * Sets the value of the given variable in the environment.  If the variable
+ * already exists, its value is overridden.
+ */
+void
+child_set_env(char ***envp, u_int *envsizep, const char *name,
+	const char *value)
+{
+	char **env;
+	u_int envsize;
+	u_int i, namelen;
+
+	if (strchr(name, '=') != NULL) {
+		error("Invalid environment variable \"%.100s\"", name);
+		return;
+	}
+
+	/*
+	 * If we're passed an uninitialized list, allocate a single null
+	 * entry before continuing.
+	 */
+	if (*envp == NULL && *envsizep == 0) {
+		*envp = xmalloc(sizeof(char *));
+		*envp[0] = NULL;
+		*envsizep = 1;
+	}
+
+	/*
+	 * Find the slot where the value should be stored.  If the variable
+	 * already exists, we reuse the slot; otherwise we append a new slot
+	 * at the end of the array, expanding if necessary.
+	 */
+	env = *envp;
+	namelen = strlen(name);
+	for (i = 0; env[i]; i++)
+		if (strncmp(env[i], name, namelen) == 0 && env[i][namelen] == '=')
+			break;
+	if (env[i]) {
+		/* Reuse the slot. */
+		free(env[i]);
+	} else {
+		/* New variable.  Expand if necessary. */
+		envsize = *envsizep;
+		if (i >= envsize - 1) {
+			if (envsize >= 1000)
+				fatal("child_set_env: too many env vars");
+			envsize += 50;
+			env = (*envp) = xreallocarray(env, envsize, sizeof(char *));
+			*envsizep = envsize;
+		}
+		/* Need to set the NULL pointer at end of array beyond the new slot. */
+		env[i + 1] = NULL;
+	}
+
+	/* Allocate space and format the variable in the appropriate slot. */
+	env[i] = xmalloc(strlen(name) + 1 + strlen(value) + 1);
+	snprintf(env[i], strlen(name) + 1 + strlen(value) + 1, "%s=%s", name, value);
+}
+
+/*
+ * Check and optionally lowercase a domain name, also removes trailing '.'
+ * Returns 1 on success and 0 on failure, storing an error message in errstr.
+ */
+int
+valid_domain(char *name, int makelower, const char **errstr)
+{
+	size_t i, l = strlen(name);
+	u_char c, last = '\0';
+	static char errbuf[256];
+
+	if (l == 0) {
+		strlcpy(errbuf, "empty domain name", sizeof(errbuf));
+		goto bad;
+	}
+	if (!isalpha((u_char)name[0]) && !isdigit((u_char)name[0])) {
+		snprintf(errbuf, sizeof(errbuf), "domain name \"%.100s\" "
+		    "starts with invalid character", name);
+		goto bad;
+	}
+	for (i = 0; i < l; i++) {
+		c = tolower((u_char)name[i]);
+		if (makelower)
+			name[i] = (char)c;
+		if (last == '.' && c == '.') {
+			snprintf(errbuf, sizeof(errbuf), "domain name "
+			    "\"%.100s\" contains consecutive separators", name);
+			goto bad;
+		}
+		if (c != '.' && c != '-' && !isalnum(c) &&
+		    c != '_') /* technically invalid, but common */ {
+			snprintf(errbuf, sizeof(errbuf), "domain name "
+			    "\"%.100s\" contains invalid characters", name);
+			goto bad;
+		}
+		last = c;
+	}
+	if (name[l - 1] == '.')
+		name[l - 1] = '\0';
+	if (errstr != NULL)
+		*errstr = NULL;
+	return 1;
+bad:
+	if (errstr != NULL)
+		*errstr = errbuf;
+	return 0;
 }

@@ -33,9 +33,6 @@
     <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\blowfish.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\bsd-arc4random.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\bsd-asprintf.c">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -96,19 +93,10 @@
     <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\getgrouplist.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\getopt.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\getopt_long.c">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\getrrsetbyname-ldns.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\getrrsetbyname.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\glob.c">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\inet_aton.c">
@@ -132,9 +120,6 @@
     <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\openssl-compat.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\port-aix.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\port-irix.c">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -144,22 +129,16 @@
     <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\port-solaris.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\port-tun.c">
+    <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\port-net.c">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\port-uw.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\pwcache.c">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\readpassphrase.c">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\reallocarray.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\realpath.c">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\rmd160.c">
@@ -180,9 +159,6 @@
     <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\sha2.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\sigact.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\strlcat.c">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -190,9 +166,6 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\strmode.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\strnlen.c">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\strptime.c">
@@ -222,7 +195,16 @@
     <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\xcrypt.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\xmmap.c">
+    <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\bsd-getpagesize.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\recallocarray.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\glob.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="$(OpenSSH-Src-Path)openbsd-compat\strcasestr.c">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -296,7 +278,7 @@
     <ClInclude Include="$(OpenSSH-Src-Path)openbsd-compat\port-solaris.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="$(OpenSSH-Src-Path)openbsd-compat\port-tun.h">
+    <ClInclude Include="$(OpenSSH-Src-Path)openbsd-compat\port-net.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="$(OpenSSH-Src-Path)openbsd-compat\port-uw.h">
@@ -312,9 +294,6 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="$(OpenSSH-Src-Path)openbsd-compat\sha2.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="$(OpenSSH-Src-Path)openbsd-compat\sigact.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="$(OpenSSH-Src-Path)openbsd-compat\sys-queue.h">
