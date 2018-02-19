@@ -346,6 +346,10 @@ local_do_shell(const char *args)
 static void
 local_do_ls(const char *args)
 {
+#ifdef WIN32_FIXME
+#undef _PATH_LS
+#define _PATH_LS			"dir"
+#endif
 	if (!args || !*args)
 		local_do_shell(_PATH_LS);
 	else {
@@ -2469,10 +2473,11 @@ main(int argc, char **argv)
      
     WSHELPinitialize();
     
-    allocate_standard_descriptor(STDIN_FILENO);
-    allocate_standard_descriptor(STDOUT_FILENO);
-    allocate_standard_descriptor(STDERR_FILENO);
-    
+    //allocate_standard_descriptor(STDIN_FILENO);
+    //allocate_standard_descriptor(STDOUT_FILENO);
+    //allocate_standard_descriptor(STDERR_FILENO);
+	setvbuf(stdout, NULL, _IONBF, 0);
+
     LoadLibrary("libwindbg.dll");
     
     //sfd_start = 3;
